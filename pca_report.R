@@ -1,4 +1,25 @@
+do_my_pca <- function(data, n_comp = 5) {
+  require(flashpcaR)
+  require(matrixStats)
+  
+  data <- data[matrixStats::rowVars(data)!=0, ]
+  data_t <- t(data)
+  
+  pca_res <- flashpca(
+    X = data_t,
+    do_loadings = TRUE,
+    verbose = FALSE,
+    stand = "sd", 
+    ndim = min(nrow(data_t)-1, n_comp),
+    return_scale = TRUE
+  )
+  pca_res$var_names <- colnames(data_t)
+  rownames(pca_res$loadings) <- colnames(data_t)
+  return(pca_res)
+ }
+ 
 pca_report <- function(
+  pca_res, ## from do_my_pca
   data,
   design,
   id_var = "Sample_ID",
@@ -7,18 +28,11 @@ pca_report <- function(
   fig_n_comp = n_comp
 ) {
 
-  require(flashpcaR)
   require(scales)
   require(tidyverse)
   require(factoextra) ## to show contrib in PCA axes 
   
   #### function needed ####
-  my_flashpca <- function(X, ...) {
-    res_pca <- flashpca(X, ...)
-    res_pca$var_names <- colnames(X)
-    rownames(res_pca$loadings) <- colnames(X)
-    return(res_pca)
-  }
   
   .get_pca_var_results <- function(var.coord) {
     var.cor <- var.coord
@@ -86,19 +100,9 @@ pca_report <- function(
     )
   }
 
+  data <- data[matrixStats::rowVars(data)!=0, ]
   data_t <- t(data)
-  data_t <- data_t[, colSums(data_t==0)!=nrow(data_t)] ## remove constant
-
-  #### do PCA ####
-  pca_res <- my_flashpca(
-    X = data_t,
-    stand = "sd",
-    ndim = n_comp,
-    do_loadings=TRUE, 
-    verbose=FALSE, 
-    return_scale=TRUE
-  )
-  
+ 
   pca_dfxy <- pca_res %>%
     `[[`("projection") %>%
     as.data.frame() %>%
@@ -321,7 +325,9 @@ pca_report <- function(
 # n_comp = 5
 # fig_n_comp = n_comp
 # 
-# test <- pca_report(
+# pca_res <- do_my_pca(data = counts_annotated,n_comp = 5)
+# all_fig <- pca_report(
+#     pca_res = pca_res,
 #     data = counts_annotated,
 #     design = CovData,
 #     id_var = "samples",
@@ -332,13 +338,6 @@ pca_report <- function(
 
 # CovData$type2 <- c(rep(1,30),rep(0,29))
 # technical_vars =  c("type","type2") 
-# test2 <- pca_report(
-#     data = counts_annotated,
-#     design = CovData,
-#     id_var = "samples",
-#     technical_vars = c("type","type2"),
-#     n_comp = 5,
-#     fig_n_comp = 5
-# )
+
 
 ## many thanks to mcanouil for this development
