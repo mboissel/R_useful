@@ -129,3 +129,68 @@ micben <- microbenchmark::microbenchmark(
 autoplot(micben)
 
 
+
+
+
+
+
+#### Example of time for if or switch
+
+val1 <- 6
+val2 <- 7
+val3 <- "s"
+
+mybenchmark_if <- bench::mark(
+  "switch" = {
+    result <- switch(
+      val3,
+      "a" = cat("Addition =", val1 + val2),
+      "d" = cat("Subtraction =", val1 - val2),
+      "r" = cat("Division = ", val1 / val2),
+      "s" = cat("Multiplication =", val1 * val2),
+      "m" = cat("Modulus =", val1 %% val2),
+      "p" = cat("Power =", val1 ^ val2)
+    )
+  },
+  "if" = {
+    resultif <- local({
+      if (val3 %in% "a") cat("Addition =", val1 + val2)
+      if (val3 %in% "d") cat("Subtraction =", val1 - val2)
+      if (val3 %in% "r") cat("Division = ", val1 / val2)
+      if (val3 %in% "s") cat("Multiplication =", val1 * val2)
+      if (val3 %in% "m") cat("Modulus =", val1 %% val2)
+      if (val3 %in% "p") cat("Power =", val1 ^ val2)
+    })
+  }
+)
+mybenchmark_if
+
+## vizualisation
+autoplot(mybenchmark_if, type = "violin")
+
+
+
+### Time between for and lapply
+
+mybenchmark_for <- bench::mark(
+  "for" = {
+    init_tabfor <- data.frame(my_res = rep(NA, 10)) # allocation of memory limited
+    for (i in 1:10) {
+      init_tabfor$my_res[i] <- i + 2 # of what ever
+    }
+    init_tabfor
+  },
+  "lapply" = {
+    init_tabapply <- data.frame(
+      my_res = unlist(lapply(X = 1:10, FUN = function(i) {
+        i + 2
+      }))
+    )
+    init_tabapply
+  }
+)
+mybenchmark_for
+
+## vizualisation
+autoplot(mybenchmark_for, type = "violin")
+
