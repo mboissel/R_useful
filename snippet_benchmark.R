@@ -3,11 +3,17 @@
 ################################
 ## (i.e. compare chunk of code, optimise running time...)
 
-## load package
-library(microbenchmark) # example 1 
-library(bench) ## example 2 
+renv::install("microbenchmark")
+renv::install("bench")
+renv::install("ggplot2")
+renv::install("magrittr")
 
-library(ggplot) ## for the vizualisations
+## load package
+library(microbenchmark) # example 1
+library(bench) ## example 2
+
+library(ggplot2) ## for the vizualisations
+`%>%` <- magrittr::`%>%`
 
 ####  example 1 : microbenchmark  ==================================================================
 
