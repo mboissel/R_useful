@@ -1,0 +1,714 @@
+---
+title: "[MiST] Reproducible example"
+output: 
+  html_document:
+    code_folding: show
+    theme:
+      bg: "#202123"
+      fg: "#B8BCC2"
+      primary: "#EA80FC"
+      base_font:
+        google: Prompt
+      heading_font:
+        google: Proza Libre
+      version: 3
+---
+
+```{r setup, include=FALSE}
+options(stringsAsFactors = FALSE)
+library(tidyverse)
+library(knitr)
+opts_chunk$set(
+  echo = TRUE,
+  autodep = TRUE
+)
+
+if (requireNamespace("thematic")) thematic::thematic_rmd(font = "auto")
+
+```
+
+## Rare Variants Analyses
+
+### Definitions
+
+Les variants rares (ayant une MAF < 0,05) ne peuvent pas être étudié comme les variants fréquents, un à un avec de simples tests d'associations.
+Cette approche aurait peu de puissance à cause de la faible fréquence et du grand nombre de variants rares.
+Par une méthode d’**agrégation de variants**, nous étudions leur effets au travers de score traduisant la présence ou l’absence de variants rares par individus, au sein d'une région génétique.
+On recherche ensuite des associations entre ces scores et les traits phénotypiques.
+
++ Les **Burdens Tests** : Testent l’effet cumulatif des variants rares regroupés par région génétique, de façon linéaire ou non.
++ Les **Variance-component Tests** : Testent la variance au sein de la région génétique comprenant les variants rares.
++ **Combined tests** : Tester l’effet agrégé des variants et leur variance au sein de la région génétique.
+
+Le modèle testé pour l'analyse d'un cluster est le suivant :
+
+$Y = \alpha X + \hat{\pi} GZ_1$
+
+Avec, $Y$ la matrice de phénotype (n x 1) pour n individus,
+
+$X$ la matrice de covariables (n x p) avec p covariables,
+
+$G$ la matrice de génotypes (n x q) codé 0, 1 et 2 pour AA, Aa, aa, où A est l'allèle majeur and a l'allele mineur et
+
+$Z_1$ la matrice d'une colonne composée de q 1 (pour les q variants traités dans un unique cluster)
+
+Le modèle testé pour l'analyse d'un "super-cluster" ayant des sous-structures connues est le suivant :
+
+$Y = \alpha X + \hat{\pi} GZ_2$, avec
+
+$Z_2$ la matrice disjonctive indiquant 1 ou 0 pour définir l'appartenance d'un variant à un sous-cluster.
+
+### Generate data
+
++ Les variables Y sont nos phénotypes d'intérêt,
++ Les variables X sont des covariables d'ajustements (AGE, SEX, BMI, PCs ethniques...),
++ Les variables G sont les variants ayant passés nos QCs, prêts à être analysé en tant que cluster,
++ La matrice z_1 permet de paramétrer le modèle en indiquant ici que tous les variants font partie d'un même cluster,
++ La matrice z_2 permet de paramétrer le modèle en indiquant ici que les variants peuvent être classés en 2 sous-structures au sein d'un seul "super-cluster".
+
+```{r data-generation}
+set.seed(20191202)
+sample_size <- 100
+data <- data.frame(
+  y_raw = rnorm(sample_size, 10, 2),
+  y_continuous_NO_ASSO = c(rnorm(sample_size / 2, 10, 0.2), rnorm(sample_size / 2, 10, 0.1)),
+  y_continuous_ASSO = c(rnorm(sample_size / 2, 4.1, 0.2), rnorm(sample_size / 2, 6.5, 0.1)),
+  y_binary_NO_ASSO = sample(x = c(0,1), size = sample_size, replace = TRUE),
+  y_binary_ASSO = rep(c(0, 1), each = sample_size / 2),
+  x_cov1 = runif(sample_size),
+  x_cov2 = rnorm(sample_size, 25, 5),
+  g_variant1 = c(rbinom(sample_size / 2, 2, prob = 0.001), rbinom(sample_size / 2, 2, prob = 0.05)),
+  g_variant2 = c(rbinom(sample_size / 2, 2, prob = 0.01), rbinom(sample_size / 2, 2, prob = 0.04)),
+  g_variant3 = c(rbinom(sample_size / 2, 2, prob = 0.01), rbinom(sample_size / 2, 2, prob = 0.05)),
+  g_variant4 = c(rbinom(sample_size / 2, 2, prob = 0.02), rbinom(sample_size / 2, 2, prob = 0.049))
+)
+z_1 <- matrix(
+  data = 1,
+  nrow = length(paste0("g_variant", 1:4)),
+  ncol = 1,
+  dimnames = list(paste0("g_variant", 1:4), "cluster")
+)
+z_2 <- matrix(
+  c(1, 0, 1, 0, 0, 1, 0, 1),
+  nrow = length(paste0("g_variant", 1:4)),
+  ncol = 2,
+  dimnames = list(paste0("g_variant", 1:4), paste0("cluster", 1:2))
+)
+```
+
+### MiST 1.0 from CRAN
+
+Pour vous montrer les sorties initiales que nous donnait le package MiST, nous testons ici les fonctions `linear.test` lorsque le phénotype d'intérêt est quantitative et `logit.test` lorsque le phénotype d'intérêt est binaire.
+
+*N.B. : Nous n'avons pas eu a utilisé les versions pondérées de ces fonctions puisque nous ne traitions que les variants rares.*
+*Cependant, sachez qu'il existe les fonctions `linear.weight.test` et `logit.weight.test`*
+*qui peuvent pondérer les variants suivant leur MAF*
+*(si vous souhaitiez analyser les variants rares et fréquents au sein d'un même cluster par exemple).*
+
+Comme la documention du package l'indique [ici](https://cran.r-project.org/web/packages/MiST/index.html), ces fonctions retournent  
+une p-valeur pour le score Pi (l'effet moyen du cluster sur Y),  
+une p-valeur pour le score Tau (l'hétérogénité du cluster de variants rares),  
+et une p-valeur `overall` qui combine les deux précedentes p-valeurs par une procédure de Fisher.
+
+```{r old-mist-chunk}
+## Install MiST from CRAN:
+# install.packages("MiST") ## Official version dev by Jianping Sun, Yingye Zheng, and Li Hsu
+## archived now https://cran.r-project.org/src/contrib/Archive/MiST/MiST_1.0.tar.gz
+renv::install("https://cran.r-project.org/src/contrib/Archive/MiST/MiST_1.0.tar.gz")
+library(MiST)
+packageDescription("MiST")
+
+# >> Test des traits continus.
+
+# Pas d'association attendue : Y construit avec la fonction rnorm.
+linear.test(
+  y = as.matrix(data[, "y_continuous_NO_ASSO", drop = FALSE]),
+  X = as.matrix(data[, paste0("x_cov", 1:2), drop = FALSE]),
+  G = as.matrix(data[, paste0("g_variant", 1:4), drop = FALSE]),
+  Z = z_1
+)
+
+# Association attendue, moyenne de Y plus élevée pour la seconde partie du jeu de données.
+linear.test(
+  y = as.matrix(data[, "y_continuous_ASSO", drop = FALSE]),
+  X = as.matrix(data[, paste0("x_cov", 1:2), drop = FALSE]),
+  G = as.matrix(data[, paste0("g_variant", 1:4), drop = FALSE]),
+  Z = z_1
+)
+
+# >> Test des traits binaires.
+
+# Pas d'association attendue : Y construit avec la fonction aléatoire sample.
+logit.test(
+  y = as.matrix(data[, "y_binary_NO_ASSO", drop = FALSE]),
+  X = as.matrix(data[, paste0("x_cov", 1:2), drop = FALSE]),
+  G = as.matrix(data[, paste0("g_variant", 1:4), drop = FALSE]),
+  Z = z_1
+)
+
+# Association attendue, P(Y=1) > P(Y=0) dans la seconde partie du jeu de données.
+logit.test(
+  y = as.matrix(data[, "y_binary_ASSO", drop = FALSE]),
+  X = as.matrix(data[, paste0("x_cov", 1:2), drop = FALSE]),
+  G = as.matrix(data[, paste0("g_variant", 1:4), drop = FALSE]),
+  Z = z_1
+)
+
+# unload-mist
+unloadNamespace("MiST")
+## Just to unload the MiST package from CRAN and here under load our version...
+```
+
+### MiST modified by UMR8199
+
+Nous n'avons pas changé les élèments initiaux de MiST, ainsi les statistiques sur le score Pi, le score Tau et la p-valeur *overall* ont été sauvé dans l'objet `statistics`.  
+
+Notre développement est partie du constat suivant :
+les scores tels qu'ils sont contruits ne nous donnent pas le sens de l'effet du cluster sur le phénotype.
+Nous ne pouvions pas répondre à la question : Ce cluster de variants rares est-il protecteur ou délétère en vers le trait phénotypique étuidé?  
+
+Dans ce but, nous avons extrait cette information qui était disponible au moment où le modele statistique était évalué dans la fonction MiST.
+
+Rappelons le modèle testé : $Y = \alpha X + \hat{\pi} GZ$
+  
+`GZ` est alors la composante génétique du modèle, i.e. le cluster. Pour savoir le sens de l'effet de notre cluster, nous avons conservé le paramètre estimé devant `GZ`, ici nommé $\hat{\pi}$. Cette information est sauvé dans l'objet `estimate`.
+
+```{r tar_mist}
+# version specific in intern project
+source("/.../scripts/tar-utils/tar-mist.R") 
+#-------------------------------------------------------------------------------
+# Name - MiST: Mixed effects Score Test for continuous outcomes
+# Desc - Test for association between a set of SNPS/genes and continuous
+#        or binary outcomes by including variant characteristic information
+#        and using (weighted) score statistics.
+# References - https://doi.org/10.1002/gepi.21717
+#-------------------------------------------------------------------------------
+
+#' mist
+#'
+#' Test for association between a set of SNPS/genes and continuous outcomes by
+#' including variant characteristic information and using score statistics.
+#'
+#' @param y [[numeric]] A `numeric` vector of the continuous outcome variables. Missing values are not allowed.
+#' @param X [[numeric]] A `numeric` matrix of covariates with rows for individuals and columns for covariates.
+#'   If there is no covariate, it does not need to be specified
+#' @param G [[numeric]] A `numeric` genotype matrix with rows for individuals and columns for SNPs.
+#'   Each SNP should be coded as 0, 1, and 2 for AA, Aa, aa, where A is a major allele and a is a minor allele.
+#'   Missing genotypes are not allowed.
+#' @param Z [[numeric]] a `numeric` matrix of second level covariates for variant characteristics.
+#'   Each row corresponds to a variant and each column corresponds to a variant characteristic.
+#'   If there is no second level covariates, a vector of 1 should be used.
+#' @param method [[character]] A method to compute the p-value and the default value is "liu".
+#'   Method "davies" represents an exact method that computes the p-value
+#'     by inverting the characteristic function of the mixture chisq.
+#'   Method "liu" represents an approximation method that matches the first 3 moments.
+#' @param model [[character]] A `character` vector specifying the model. Default is to `"guess"`.
+#'   Possible choices are `"guess"`, `"continuous"` (linear regression) or `"binary"` (logistic regression).
+#' @param weight.beta [[numeric]] A `numeric` vector of parameters of beta function
+#'   which is the weight for scorestatistics.
+#'   The default value is `NULL`, *i.e.* no weight.
+#'   Default weight value could be `c(1, 25)`.
+#' @param maf [[numeric]] A `numeric` vector of MAF (minor allele frequency) for each SNP.
+#' @param quiet logical defining is messages should be displayed.
+#'
+#' @return
+#' * S.tau score Statistic for the variant heterogeneous effect.
+#' * S.pi score Statistic for the variant mean effect.
+#' * p.value.S.tau P-value for testing the variant heterogeneous effect.
+#' * p.value.S.pi P-value for testing the variant mean effect.
+#' * p.value.overall Overall p-value for testing the association between the set of SNPS/genes and outcomes.
+#'   It combines p.value.S.pi and p.value.S.tau by using Fisher's procedure.
+#'
+#' @export
+#'
+#' @examples
+#'
+#' library(MiSTr)
+#' data(mist_data)
+#' attach(mist_data)
+#'
+#' mist(
+#'   y = phenotypes[, "y_taupi"],
+#'   X = phenotypes[, paste0("x_cov", 0:2)],
+#'   G = genotypes,
+#'   Z = variants_info[, 1, drop = FALSE]
+#' )
+#'
+#' mist(
+#'   y = phenotypes[, "y_binary"],
+#'   X = phenotypes[, paste0("x_cov", 0:2)],
+#'   G = genotypes,
+#'   Z = variants_info[, 1, drop = FALSE]
+#' )
+#'
+mist <- function(
+  y, X, G, Z,
+  method = "liu",
+  model = c("guess", "continuous", "binary"),
+  weight.beta = NULL, # c(1, 25)
+  maf = NULL,
+  quiet = FALSE
+) {
+  model <- match.arg(model, c("guess", "continuous", "binary"))
+  method <- match.arg(method, c("liu", "davies"))
+
+  check_y <- c("continuous", "binary")[(length(unique(y)) == 2) + 1]
+  if (any(grepl("guess", model))) {
+    if (!quiet) message('[MiSTr] "y" seems to be "', check_y, '", model is set to "', check_y, '"!')
+    model <- check_y
+  }
+  if (model != check_y) {
+    warning('[MiSTr] "y" seems to be "', check_y, '" and model was set to "', model, '"!')
+  }
+  output <- switch(
+    EXPR = model,
+    "continuous" = {
+      if (!quiet) message(paste("[MiSTr] Linear regression is ongoing ..."))
+      tidy_mist(mist_linear(y, X, G, Z, method, weight.beta, maf, quiet = TRUE))
+    },
+    "binary" = {
+      if (!quiet) message("[MiSTr] Logistic regression is ongoing ...")
+      tidy_mist(mist_logit(y, X, G, Z, method, weight.beta, maf, quiet = TRUE))
+    }
+  )
+  class(output) <- "mist"
+  output
+}
+
+
+#' tidy_mist / mist_print
+#'
+#' @param x [[mist]]
+#'
+#' @keywords internal
+#' @usage NULL
+#'
+#' @return list
+tidy_mist <- function(x) {
+  cluster_name <- sub("^M", "", rownames(x$out_estimate))
+  rownames(x$out_estimate) <- NULL
+  stat_rare <- cbind.data.frame(
+    "SubClusters" = ifelse(cluster_name == "", "None", cluster_name),
+    x$out_estimate
+  )
+
+  list(estimate = stat_rare, statistics = as.data.frame(x$out_statistics))
+}
+
+
+#' Print method for mist objec
+#'
+#' @param x [[mist]]
+#' @param ... Other arguments (Not used).
+#'
+#' @return list
+#' @export
+print.mist <- function(x, ...) {
+  terms_columns <- grep("SubClusters|term.pi.hat", names(x$estimate))
+  x$estimate[, -terms_columns] <- round(x$estimate[, -terms_columns], digits = 3)
+
+  cat(
+    "",
+    "MiSTr: Mixed effects Score Test",
+    "-------------------------------",
+    "",
+    "- (Raw) Estimates:",
+    "",
+    sep = "\n"
+  )
+
+  print.data.frame(x$estimate)
+
+  cat(
+    "\n",
+    "- Statistics:",
+    "\n\n",
+    "  + Overall effect: ",
+    "\n",
+    "    * P-value = ", format.pval(x$statistics[, "p.value.overall"], digits = 3),
+    "\n",
+    "  + PI (mean effect):  ",
+    "\n",
+    "    * Score = ", round(x$statistics[, "S.pi"], digits = 3),
+    "\n",
+    "    * P-value = ", format.pval(x$statistics[, "p.value.S.pi"], digits = 3),
+    "\n",
+    "  + TAU (heterogeneous effect):  ",
+    "\n",
+    "    * Score = ", round(x$statistics[, "S.tau"], digits = 3),
+    "\n",
+    "    * P-value = ", format.pval(x$statistics[, "p.value.S.tau"], digits = 3),
+    "\n\n",
+    sep = ""
+  )
+
+  invisible(x)
+}
+
+
+#' mist_logit
+#'
+#' @inheritParams mist
+#'
+#' @keywords internal
+#' @usage NULL
+#'
+#' @importFrom broom tidy
+#'
+#' @return data.frame
+mist_logit <- function(y, X, G, Z, method = "liu", weight.beta = NULL, maf = NULL, quiet = FALSE) {
+  method <- match.arg(method, c("liu", "davies"))
+  if (!is.vector(y, "numeric")) stop('[MiSTr] "y" must be a numeric vector.')
+  if (!(is.matrix(X) && is.numeric(X))) stop('[MiSTr] "X", must be a numeric matrix.')
+  if (!(is.matrix(G) && is.numeric(G))) stop('[MiSTr] "G", must be a numeric matrix.')
+  if (!(is.matrix(Z) && is.numeric(Z))) stop('[MiSTr] "Z", must be a numeric matrix.')
+  if ((is.null(weight.beta) || is.null(maf)) && !all(is.null(c(weight.beta, maf)))) {
+    warning('[MiSTr] Both or none of "weight.beta" and "maf" must be provided.')
+    if (!quiet)  message('[MiSTr] Falling back to default with "weight.beta = NULL" and "maf = NULL".')
+  }
+
+  GZ <- G %*% Z
+  M <- cbind(X, GZ)
+
+  fit.0 <- stats::glm(
+    formula = y ~ X - 1,
+    family = stats::binomial(link = "logit")
+  )
+  mu.0 <- fit.0$fitted.value
+  d.0 <- mu.0 * (1 - mu.0)
+  res.0 <- y - mu.0
+
+  fit.0a <- stats::glm(
+    formula = y ~ -1 + X + GZ,
+    family = stats::binomial(link = "logit")
+  )
+  mu.0a <- fit.0a$fitted.value
+  d.0a <- mu.0a * (1 - mu.0a)
+  res.0a <- y - mu.0a
+
+  D.0 <- diag(d.0)
+  D.0a <- diag(d.0a)
+
+  tXD0X <- t(X) %*% D.0 %*% X
+  inv.tXD0X <- solve(tXD0X)
+
+  tMD0aM <- t(M) %*% D.0a %*% M
+  inv.tMD0aM <- solve(tMD0aM)
+
+  P01 <- D.0 - (d.0 %o% d.0) * (X %*% (inv.tXD0X) %*% t(X))
+  P02 <- D.0a - (d.0a %o% d.0a) * (M %*% (inv.tMD0aM) %*% t(M))
+
+  if (is.null(weight.beta) || is.null(maf)) {
+    S.tau <- 0.5 * t(res.0a) %*% G %*% t(G) %*% res.0a
+  } else {
+    W <- diag(stats::dbeta(maf, weight.beta[1], weight.beta[2])^2)
+    S.tau <- 0.5 * t(res.0a) %*% G %*% W %*% t(G) %*% res.0a
+  }
+
+  inv.I.pi <- solve(t(GZ) %*% P01 %*% GZ)
+
+  S.pi <- t(res.0) %*% GZ %*% inv.I.pi %*% t(GZ) %*% res.0
+
+  p.value.S.pi <- 1 - stats::pchisq(S.pi, df = dim(Z)[2])
+
+  if (is.null(weight.beta) || is.null(maf)) {
+    Mat <- 0.5 * t(G) %*% P02 %*% G
+  } else {
+    Mat <- 0.5 * sqrt(W) %*% t(G) %*% P02 %*% G %*% sqrt(W)
+  }
+  lambda <- eigen(Mat, symmetric = TRUE)$values
+
+  p.value.S.tau <- switch(EXPR = method,
+    "davies" = {
+      tryCatch(
+        expr = CompQuadForm::davies(S.tau, lambda)$Qq,
+        error = function(e) NA
+      )
+    },
+    "liu" = {
+      tryCatch(
+        expr = CompQuadForm::liu(S.tau, lambda),
+        error = function(e) NA
+      )
+    }
+  )
+
+  q.fisher <- -2 * (log(p.value.S.tau) + log(p.value.S.pi))
+  p.value.overall <- 1 - stats::pchisq(q.fisher, df = 4)
+
+  out_statistics <- list(
+    S.pi = S.pi,
+    p.value.S.pi = p.value.S.pi,
+    S.tau = S.tau,
+    p.value.S.tau = p.value.S.tau,
+    p.value.overall = p.value.overall
+  )
+
+  out_estimate <- broom::tidy(fit.0a, conf.int = TRUE, exponentiate = TRUE)
+  out_estimate <- out_estimate[grep(paste(c("^GZ$", colnames(GZ)), collapse = "|"), out_estimate[["term"]]), ]
+  colnames(out_estimate) <- sprintf("%s.pi.hat", colnames(out_estimate))
+
+  list(out_statistics = out_statistics, out_estimate = out_estimate)
+}
+
+
+#' mist_linear
+#'
+#' @inheritParams mist
+#'
+#' @keywords internal
+#' @usage NULL
+#'
+#' @importFrom broom tidy
+#'
+#' @return data.frame
+mist_linear <- function(y, X, G, Z, method = "liu", weight.beta = NULL, maf = NULL, quiet = FALSE) {
+  method <- match.arg(method, c("liu", "davies"))
+  if (!is.vector(y, "numeric")) stop('"y" must be a numeric vector.')
+  if (!(is.matrix(G) && is.numeric(G))) stop('"G", must be a numeric matrix.')
+  if (!(is.matrix(X) && is.numeric(X))) stop('"X", must be a numeric matrix.')
+  if (!(is.matrix(Z) && is.numeric(Z))) stop('"Z", must be a numeric matrix.')
+  if ((is.null(weight.beta) || is.null(maf)) && !all(is.null(c(weight.beta, maf)))) {
+    warning('[MiSTr] Both or none of "weight.beta" and "maf" must be provided.')
+    if (!quiet) message('[MiSTr] Falling back to default with "weight.beta = NULL" and "maf = NULL".')
+  }
+
+  GZ <- G %*% Z
+  M <- cbind(X, GZ)
+
+  tXX <- t(X) %*% X
+  inv.tXX <- solve(tXX)
+
+  tMM <- t(M) %*% M
+  inv.tMM <- solve(tMM)
+
+  fit.0 <- stats::lm(y ~ X - 1)
+  tilde.sigma2 <- summary(fit.0)$sigma^2
+  res.0 <- fit.0$resid
+
+  fit.0a <- stats::lm(y ~ M - 1)
+  hat.sigma2 <- summary(fit.0a)$sigma^2
+  res.0a <- fit.0a$resid
+
+  n <- dim(X)[1]
+  I <- diag(1, n)
+
+  P2 <- I - X %*% inv.tXX %*% t(X)
+  P1 <- I - M %*% inv.tMM %*% t(M)
+
+  if (is.null(weight.beta) || is.null(maf)) {
+    S.tau <- t(res.0a) %*% G %*% t(G) %*% res.0a
+  } else {
+    W <- diag(stats::dbeta(maf, weight.beta[1], weight.beta[2])^2)
+    S.tau <- t(res.0a) %*% G %*% W %*% t(G) %*% res.0a
+  }
+
+  inv.I.pi <- solve(t(GZ) %*% P2 %*% GZ)
+
+  S.pi <- t(res.0) %*% GZ %*% inv.I.pi %*% t(GZ) %*% res.0
+  S.pi <- S.pi / tilde.sigma2
+
+  p.value.S.pi <- 1 - stats::pchisq(S.pi, df = dim(Z)[2])
+
+  if (is.null(weight.beta) || is.null(maf)) {
+    P1.G <- P1 %*% G
+  } else {
+    P1.G <- P1 %*% G %*% sqrt(W)
+  }
+  Mat <- (hat.sigma2) * t(P1.G) %*% P1.G
+  lambda <- eigen(Mat, symmetric = TRUE)$values
+
+  p.value.S.tau <- switch(EXPR = method,
+    "davies" = {
+      tryCatch(
+        expr = CompQuadForm::davies(S.tau, lambda)$Qq,
+        error = function(e) NA
+      )
+    },
+    "liu" = {
+      tryCatch(
+        expr = CompQuadForm::liu(S.tau, lambda),
+        error = function(e) NA
+      )
+    }
+  )
+
+  q.fisher <- -2 * (log(p.value.S.tau) + log(p.value.S.pi))
+  p.value.overall <- 1 - stats::pchisq(q.fisher, df = 4)
+
+  out_statistics <- list(
+    S.pi = S.pi,
+    p.value.S.pi = p.value.S.pi,
+    S.tau = S.tau,
+    p.value.S.tau = p.value.S.tau,
+    p.value.overall = p.value.overall
+  )
+
+  out_estimate <- broom::tidy(fit.0a, conf.int = TRUE, exponentiate = FALSE)
+  out_estimate <- out_estimate[grep(paste(c("^GZ$", colnames(GZ)), collapse = "|"), out_estimate[["term"]]), ]
+  colnames(out_estimate) <- sprintf("%s.pi.hat", colnames(out_estimate))
+
+  list(out_statistics = out_statistics, out_estimate = out_estimate)
+}
+
+```
+
+```{r new-mist-chunk}
+# >> Test continu.
+my_asso_quanti <- mist(
+  y = data[, "y_continuous_ASSO"],
+  X = as.matrix(data[, paste0("x_cov", 1:2), drop = FALSE]),
+  G = as.matrix(data[, paste0("g_variant", 1:4), drop = FALSE]),
+  Z = z_1,
+  method = "liu",
+  model = "continuous"
+)
+my_asso_quanti
+my_asso_quanti$statistics
+my_asso_quanti$estimate
+
+# >> Test binaire.
+my_asso_binary <- mist(
+  y = data[, "y_binary_ASSO"],
+  X = as.matrix(data[, paste0("x_cov", 1:2), drop = FALSE]),
+  G = as.matrix(data[, paste0("g_variant", 1:4), drop = FALSE]),
+  Z = z_1,
+  method = "liu",
+  model = "binary"
+)
+my_asso_binary
+my_asso_binary$statistics
+my_asso_binary$estimate
+```
+
+### With an heterogeneous effect of the cluster
+
+Comme indiqué dans l'introduction, l'intérêt de MiST par rapport au *bureden test*, est son caractère informatif sur la nature hétèrogène du cluster de variants rares.
+
+En effet, imaginons le cas où nous aurions un trait Y à tester avec un cluster composé de 2 variants protecteurs et 2 variants délétères.  
+(Avec un simple burden test)  L'effet aggrégé de ces variants pourraient conduire à une p-valeur non significative puisque "au global", la somme des effets s'annulerait.
+
+Dans l'exemple ci dessous, vous construisons un trait quantitif comme décrit ci-dessus pour vous présenter la logique d'analyse que nous avons eu.
+
+Si un effet *Tau* était significatif, cela était pour nous un marqueur d'hétérogénéité.  
+Dans ce cas, Amélie menait à bien la démarche d'annotation ACMG pour les variants rares afin de pouvoir affiner l'analyse et détécter les variants les plus pathogènes.
+
+Ici dans notre exemple, le sénario idéal serait celui où les critères ACMG 
+nous auraient indiqué que seuls les variants 1 et 3 étaient pathogènes.
+
+```{r cluster-hetero}
+# Construisons un trait quantitatif comme décrit ci-dessus.
+data$y_heterogene_ASSO <- data$y_raw + 
+  data$g_variant1 * 2.2 + 
+  data$g_variant2 * -0.9 + 
+  data$g_variant3 * 2.3 + 
+  data$g_variant4 * -1.5
+
+# Notre première analyse se fait avec Z1 mettant tous les variants dans un même cluster
+z_1 <- matrix(
+  data = 1,
+  nrow = length(paste0("g_variant", 1:4)), 
+  ncol = 1,
+  dimnames = list(paste0("g_variant", 1:4), "cluster")
+)
+
+mist(
+  y = data[, "y_heterogene_ASSO"],
+  X = as.matrix(data[, paste0("x_cov", 1:2), drop = FALSE]),
+  G = as.matrix(data[, paste0("g_variant", 1:4), drop = FALSE]),
+  Z = z_1,
+  method = "liu",
+  model = "continuous"
+)
+# Le score Pi n'est pas significatif, donc il semble que, au global, la somme des effets s'annulent...
+# La P-valeur overall étant significative, nous pouvons nous dire qu'il y a quand meme une structure dans nos données génétique associée à Y.
+# Le score Tau est significatif, ce qui peut nous indiquer qu'affiner l'analyse avec un cluster moins hétérogène serait judicieux
+
+# L'expertise d'Amélie avec les critères ACMG et son étude approfondie des listes de porteurs 
+# nous permettent ici d'affiner l'analyse avec seulement les variants les plus pathogènes :
+# Le cluster est bien moins hétérogène, l'effet moyen du cluster est significatif et l'effet global est toujours significatif
+mist(
+  y = data[, "y_heterogene_ASSO"],
+  X = as.matrix(data[, paste0("x_cov", 1:2), drop = FALSE]),
+  G = as.matrix(data[, paste0("g_variant", c(1, 3)), drop = FALSE]),
+  Z = z_1[paste0("g_variant", c(1, 3)), , drop = FALSE],
+  method = "liu",
+  model = "continuous"
+)
+
+# Une autre démarche possible serait de conserver les variants protecteurs et délétaires mais d'indiquer cette structuration via Z_2
+mist(
+  y = data[, "y_heterogene_ASSO"],
+  X = as.matrix(data[, paste0("x_cov", 1:2), drop = FALSE]),
+  G = as.matrix(data[, paste0("g_variant", 1:4), drop = FALSE]),
+  Z = z_2,
+  method = "liu",
+  model = "continuous"
+)
+```
+
+### Multi-Genes Analyses
+
+Dans un second temps, après que les gènes candidats aient été repéré par les analyses MiST une à une, la question s'est posé d'étudier l'effet conjoint de plusieurs gênes (selon leur thématique).  
+Dans l'étude du diabète monogénique par exemple, 33 gènes avaient été selectionnés et l'étude conjointe de ces gènes formant un "super-cluster" a été réalisée.  
+
+Nous avons alors utilisé le paramétrage du modèle $Y = \alpha X + \hat{\pi} GZ_2$, avec $Z_2$ nous permettant d'indiquer au modèle notre connaissance des sous structures de ce super-cluster (ici les sous-cluster identifés étaient donc les gènes).
+
+Dans l'exemple ci dessous, nous allons étudier l'effet conjoint de 3 gènes.
+
+```{r Supercluster}
+
+data_gene2 <- data.frame(
+  g2_variant1 = c(rbinom(sample_size / 2, 2, prob = 0.001), rbinom(sample_size / 2, 2, prob = 0.05)),
+  g2_variant2 = c(rbinom(sample_size / 2, 2, prob = 0.02), rbinom(sample_size / 2, 2, prob = 0.04)),
+  g2_variant3 = c(rbinom(sample_size / 2, 2, prob = 0.01), rbinom(sample_size / 2, 2, prob = 0.05)),
+  g2_variant4 = c(rbinom(sample_size / 2, 2, prob = 0.02), rbinom(sample_size / 2, 2, prob = 0.038))
+)
+data_gene3 <- data.frame(
+  g3_variant1 = c(rbinom(sample_size / 2, 2, prob = 0.002), rbinom(sample_size / 2, 2, prob = 0.05)),
+  g3_variant2 = c(rbinom(sample_size / 2, 2, prob = 0.003), rbinom(sample_size / 2, 2, prob = 0.03)),
+  g3_variant3 = c(rbinom(sample_size / 2, 2, prob = 0.01), rbinom(sample_size / 2, 2, prob = 0.04))
+)
+
+z_2 <- matrix(
+  c(
+    rep(1, 4), rep(0, 4), rep(0, 3), ## 1ier gène dans data avec 4 variants
+    rep(0, 4), rep(1, 4), rep(0, 3), ## 2ieme gène dans data_gene2 avec 4 variants
+    rep(0, 4), rep(0, 4), rep(1, 3) ## 3ieme gène dans data_gene3 avec 3 variants
+  ),
+  nrow = 11,
+  ncol = 3, 
+  dimnames = list(
+    c(paste0("g_variant", 1:4), paste0("g2_variant", 1:4), paste0("g3_variant", 1:3)), 
+    paste0("gene", 1:3)
+  )
+)
+
+G_super_matrix <- cbind(
+  as.matrix(data[, paste0("g_variant", 1:4), drop = FALSE]),
+  as.matrix(data_gene2[, paste0("g2_variant", 1:4), drop = FALSE]),
+  as.matrix(data_gene3[, paste0("g3_variant", 1:3), drop = FALSE])
+)
+
+# L'effet du Super-Cluster est significatif, comme attendu
+mist(
+  y = data[, "y_continuous_ASSO"],
+  X = as.matrix(data[, paste0("x_cov", 1:2), drop = FALSE]),
+  G = as.matrix(G_super_matrix),
+  Z = z_2,
+  method = "liu",
+  model = "continuous"
+)
+
+## aussi possible avec le trait binaire
+# mist(
+#   y = data[, "y_binary_ASSO"],
+#   X = as.matrix(data[, paste0("x_cov", 1:2), drop = FALSE]),
+#   G = as.matrix(G_super_matrix),
+#   Z = z_2,
+#   method = "liu",
+#   model = "binary"
+# )
+
+```
+
