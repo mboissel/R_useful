@@ -1,0 +1,183 @@
+---
+title: "Automatic Conclusion"
+author: "Guess Who"
+date: "2024-04-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Contexte
+
+```{r lib, echo=FALSE}
+library(ggplot2)
+library(data.table)
+library(gt)
+library(gtsummary)
+library(GGally)
+library(corrplot)
+library(Hmisc)
+```
+
+Good idea to let some notes about the aim of the report and the methods used for each part.
+
+**Asso tests** part shows how to generate a "gt" summary table and then use the table to automatically adapt the conclusion.
+
+**Correlation tests 2 by 2** part shows how to generate a table of correlation tests for all variables 2 by 2, and then use the table to automatically adapt the conclusion.
+
+## Asso tests
+
+```{r test1, echo=FALSE}
+my_data <- iris
+my_data$fake.variable <- sample(1:10, nrow(my_data), replace = T) / 5
+
+dt_quanti_vars <- data.table(
+  variable = names(my_data),
+  is_numeric = unlist(lapply(X = names(my_data), function(x) is.numeric(my_data[[x]]))),
+  variable_name = unlist(lapply(X = names(my_data), function(x) gsub("\\.", " ", x)))
+)
+# dt_quanti_vars
+
+my_group <- "Species"
+
+gt_res <- my_data %>%
+  tbl_summary(
+    include = all_of(c(dt_quanti_vars$variable[dt_quanti_vars$is_numeric])),
+    by = all_of(my_group),
+    statistic = list(
+      all_continuous() ~ "{mean}", # if quanti
+      all_categorical() ~ "{p}%" # if quali
+    ),
+    missing_text = "Missing"
+  ) %>%
+  bold_labels() %>%
+  add_overall() %>%
+  add_p(
+    pvalue_fun = scales::label_pvalue(accuracy = .0001)
+  ) %>%
+  modify_caption(paste0("Table: ",my_group, " vs quantitatif variables selected"))
+
+# show it
+gt_res
+
+cat("\n")
+
+## automatic comment : 
+tab_res <- gt_res$table_body
+for (i in seq_len(nrow(tab_res))) {
+  print(
+    paste0(
+      "- ", tab_res[i, "variable"], 
+      ifelse(tab_res[i, "p.value"] < 0.05, " do", " do not"),
+      " correlates with ", my_group, " (p = ", formatC(tab_res[[i, "p.value"]]), ")",
+      "\n"
+    )
+  )
+}
+
+cat("\n")
+
+## Or only make comment for significant asso : 
+tab_res <- gt_res$table_body[gt_res$table_body$p.value<0.05, ]
+cat(
+  paste0(
+    "Following variable are associated with ", my_group, " (p<0.05) : \n",
+    paste0(
+      dt_quanti_vars$variable_name[dt_quanti_vars$variable %in% tab_res$variable],
+      collapse = ", "
+    )
+  )
+)
+
+
+```
+
+
+## Correlation tests 2 by 2 
+
+
+```{r test2, echo=FALSE}
+my_data <- iris
+my_data$fake.variable <- sample(1:10, nrow(my_data), replace = T) / 5
+
+dt_quanti_vars <- data.table(
+  variable = names(my_data),
+  is_numeric = unlist(lapply(X = names(my_data), function(x) is.numeric(my_data[[x]]))),
+  variable_name = unlist(lapply(X = names(my_data), function(x) gsub("\\.", " ", x)))
+)
+# dt_quanti_vars
+my_group <- "Species"
+
+## graphic ok
+ggpairs(my_data, aes(color = my_group))
+# think to add a legend about "***" meaning
+
+cat("\n")
+
+## other graphic ok 
+corrplot(
+  cor(my_data[, c(dt_quanti_vars$variable[dt_quanti_vars$is_numeric])]),
+  method = "number",
+  type = "upper", # show only upper side
+  ## --here to see other params... # p.mat #sig.level 
+)
+
+cat("\n")
+
+## table : just cor val
+cor_tab <- cor(my_data[, c(dt_quanti_vars$variable[dt_quanti_vars$is_numeric])]) # if wanted
+# cor_tab
+
+## Hmisc
+res_corr <- rcorr(
+  as.matrix(my_data[, c(dt_quanti_vars$variable[dt_quanti_vars$is_numeric])]),
+  type = "pearson" # or "spearman" # --here you choose linear test or not
+)
+
+# get list of pairs significantly correlated : 
+# res_corr
+# res_corr$P
+# res_corr$P < 0.05
+
+correlated_variables <- data.table(
+  variable = row.names(res_corr$P), 
+  significantly_correlated_to = unlist(lapply(
+    X = row.names(res_corr$P),
+    function(ivar) {
+      tmp <- res_corr$P[ivar, ]
+      paste0(names(which(tmp < 0.05)), collapse = ",")
+    }
+  ))
+)
+
+gt::gt(correlated_variables) |>
+  tab_header(
+    title = md("Table of **significant** correlation"),
+    subtitle = md("`pearson` type of correlation")
+  )
+# I like a synthetic table. easy to read.  
+
+cat("\n")
+
+# but if you prefer sentences, you can write : 
+correlated_variables_conclusion <- correlated_variables[
+  nchar(correlated_variables$significantly_correlated_to)>0,
+]
+for (i in seq_len(nrow(correlated_variables_conclusion))) {
+  print(
+    paste0(
+      "- ", correlated_variables_conclusion[i, "variable"], 
+      " correlates with : ", correlated_variables_conclusion[i, "significantly_correlated_to"],
+      "\n"
+    )
+  )
+}
+
+# you can make this example better by listing all pairs significantly correlated, 
+# order pairs by alphabetic names, and remove duplicated info 
+# (like Sepal.Length & Petal.Length and Petal.Length & Sepal.Length)
+# etc 
+```
+
