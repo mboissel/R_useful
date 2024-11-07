@@ -3,6 +3,24 @@ install.packages("data.table")
 library(data.table)
 library(bestNormalize) # to use ordered quantile normalization
 
+#### quick test ####
+
+# Appliquer bestNormalize à votre variable Y
+best_transform <- bestNormalize(Y)
+# Afficher la transformation recommandée
+print(best_transform)
+# Transformer Y
+Y_transformed <- predict(best_transform)
+
+# Avantages de bestNormalize
+# Comparaison automatisée de transformations : bestNormalize utilise une série de transformations et choisit la plus appropriée en fonction de critères de normalité.
+# Retour facile à la valeur d’origine : une fois les analyses faites, il est possible d’inverser la transformation pour revenir aux valeurs d'origine, avec predict(best_transform, newdata = Y_transformed, inverse = TRUE).
+
+# + Cas avec des données negatives et positives (pas de transformation log ou sqrt possible) : 
+#   Utilisation de Yeo-Johnson : La transformation Yeo-Johnson, incluse dans bestNormalize, fonctionne bien pour des données ayant des valeurs négatives et positives.
+
+#### Real application ####
+
 str(datasets::women)
 dt <- data.table::setDT(datasets::women)
 str(dt)
