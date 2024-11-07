@@ -62,3 +62,26 @@ invisible(lapply(names(list_norm), function(col_i) {
 
 head(dt) 
 dt == datasets::women
+
+
+
+#### Somes alternatives transformation ####
+
+# 1. sqrt 
+Y_prim = sqrt(Y + c) # where Y+c > 0
+
+# 2. norm data from reg obj
+MASS::boxcox(reg) 
+# Le paramètre λ est optimisé pour rendre les données aussi normales que possible.
+# fonction MASS::boxcox() : calculer une valeur optimale de λ et suggérer une transformation possible pour Y.
+
+# 3. Transformation de Tukey (ou Yeo-Johnson)
+# La transformation de Tukey, également connue sous le nom de Yeo-Johnson transformation, est similaire à Box-Cox mais adaptée aux valeurs positives et négatives sans nécessiter l’ajout d’une constante.
+library(car)
+Y_prim <- powerTransform(Y)
+
+# 4. Transformation sigmoïde
+# Si Y est bornée (par exemple, comprise entre -40 et 40), une transformation sigmoïde comme la fonction tangente hyperbolique (tanh) ou sigmoïde logistique peut être utile pour limiter l'impact des valeurs extrêmes.
+Y_prim <- tanh(Y)
+# Ces transformations peuvent atténuer l'influence des valeurs extrêmes et rendre les résidus plus homogènes.
+
