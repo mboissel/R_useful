@@ -79,3 +79,57 @@ print(plot2)
 
 # patchwork
 plot1 + plot2
+
+
+#### Detect variable involved with targeted outliers ####
+
+set.seed(123)
+tab_full <- as.data.frame(matrix(rnorm(1000 * 500, mean = 10, sd = 2), ncol = 500))
+colnames(tab_full) <- paste0("var", 1:500)
+tab_full$ID <- paste0("ID_", 1:nrow(tab_full)) # Ajout d'une colonne ID
+
+# 2 targeted ID supposed outliers 
+target_ids <- c("ID_1", "ID_2")
+# create out values
+tab_full[1, 1] <- 55 
+tab_full[2, 2] <- 75
+
+# function to detect variables where look for targeted outliers 
+find_outlier_variables <- function(data, target_ids, outlier_time_IQR = 3) {
+  target_data <- data[data$ID %in% target_ids, ]
+  
+  # Init
+  outlier_vars <- list()
+  
+  for (var in setdiff(names(data), "ID")) {  
+    if (is.numeric(data[[var]])) {  # check numérique
+      # Calcul IQR
+      iqr_value <- IQR(data[[var]], na.rm = TRUE)
+      q1 <- quantile(data[[var]], 0.25, na.rm = TRUE)
+      q3 <- quantile(data[[var]], 0.75, na.rm = TRUE)
+      lower_bound <- q1 - outlier_time_IQR * iqr_value
+      upper_bound <- q3 + outlier_time_IQR * iqr_value
+      
+      # check values out
+      target_outliers <- target_data[[var]] < lower_bound | target_data[[var]] > upper_bound
+      if (any(target_outliers, na.rm = TRUE)) {
+        outlier_vars[[var]] <- target_data[target_outliers, c("ID", var), drop = FALSE]
+      }
+    }
+  }
+  
+  return(outlier_vars)
+}
+
+outliers_found <- find_outlier_variables(tab_full, target_ids)
+
+# show variables
+if (length(outliers_found) > 0) {
+  for (var in names(outliers_found)) {
+    print(paste("Variable:", var))
+    print(outliers_found[[var]])
+  }
+} else {
+  print("Aucune variable avec des outliers détectés.")
+}
+
