@@ -54,3 +54,13 @@ ciphertext
 plaintext <- aes_cbc_decrypt(data = ciphertext, key = key, iv = iv)
 rawToChar(plaintext)
 
+
+
+## autre ##
+
+texte <- "Bonjour"
+# Encodage
+code <- base64_encode(charToRaw(texte))
+# Décodage
+decode <- rawToChar(base64_decode(code))
+decode
