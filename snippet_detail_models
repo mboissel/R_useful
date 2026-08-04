@@ -681,80 +681,43 @@ get_detail_reg_log <- function(model, g_bins = 5) {
   # détection plus rigoureuse, voir package detectseparation (test de Konis).
 
   #### Validation croisée : taux de mal classés (misclassification rate) ####
-  
-  cv_misclassification <- function(model, k = 10, threshold = 0.5, seed = 123) {
+  cv_misclassification <- function(model, k = 10, seed = 1992) {
     
-    # Récupération des données et de la formule à partir du modèle ajusté
-    data_model <- model$model  # nécessite model = TRUE (par défaut pour glm)
-    formula_model <- formula(model)
-    y_name <- all.vars(formula_model)[1]
-    
-    set.seed(seed)
-    n <- nrow(data_model)
-    
-    # Découpage stratifié des folds (préserve la proportion d'événements dans chaque fold)
-    # important en cas de déséquilibre de classes
-    folds <- data.table::data.table(
-      idx = seq_len(n),
-      y = data_model[[y_name]]
+    # Capture du texte affiché par CVbinary (contient les 2 estimations d'accuracy)
+    set.seed(seed = seed)
+    captured_output <- capture.output(
+      CV_obj <- DAAG::CVbinary(obj = model, nfolds = k)
     )
     
-    # if (k == n) { # LOOCV
-    #   folds[, fold := sample(rep(1:k, length.out = .N))]
-    # } else {
-    #   folds[, fold := sample(rep(1:k, length.out = .N)), by = y]
-    # }
-    # generalisation de k == n, aussi pb si k > taille du plus petit groupe
-    min_group_size <- min(table(folds$y))
-    
-    if (k > min_group_size) {
-      message("[cv_misclassification] k > smallest class size: stratification skipped.")
-      folds[, fold := sample(rep(1:k, length.out = .N))]
-    } else {
-      folds[, fold := sample(rep(1:k, length.out = .N)), by = y]
+    # Extraction des valeurs depuis le texte imprimé (robuste, indépendant des noms internes)
+    extract_val <- function(pattern, txt) {
+      line <- grep(pattern, txt, value = TRUE)
+      as.numeric(sub(".*=\\s*", "", line))
     }
     
-    data.table::setorder(folds, idx)
-    fold_id <- folds$fold
-    
-    cv_results <- vector("list", k)
-    
-    for (i in seq_len(k)) {
-      train_data <- data_model[fold_id != i, ]
-      test_data  <- data_model[fold_id == i, ]
-      
-      # Refit du modèle sur k-1 folds
-      model_cv <- glm(formula_model, data = train_data, family = binomial)
-      
-      # Prédiction sur le fold laissé de côté
-      pred_prob <- predict(object = model_cv, newdata = test_data, type = "response")
-      pred_class <- ifelse(pred_prob > threshold, 1, 0)
-      observed_class <- as.numeric(as.character(test_data[[y_name]]))
-      
-      cv_results[[i]] <- data.frame(
-        fold = i,
-        n_test = nrow(test_data),
-        n_misclassified = sum(pred_class != observed_class, na.rm = TRUE)
-      )
-    }
-    
-    cv_df <- do.call(rbind, cv_results)
+    acc_internal <- extract_val("Internal estimate of accuracy", captured_output)
+    acc_cv       <- extract_val("Cross-validation estimate of accuracy", captured_output)
     
     list(
-      detail_by_fold = cv_df,
-      misclassification_rate = sum(cv_df$n_misclassified) / sum(cv_df$n_test),
-      accuracy = 1 - (sum(cv_df$n_misclassified) / sum(cv_df$n_test))
+      CV_object                    = CV_obj,       # objet complet retourné par CVbinary (incl. cvhat)
+      raw_output                   = captured_output,
+      internal_accuracy            = acc_internal,
+      cv_accuracy                  = acc_cv,
+      internal_misclassification   = 1 - acc_internal,
+      cv_misclassification         = 1 - acc_cv
     )
+    
   }
   cv_res <- tryCatch({
-    cv_misclassification(model, k = 10, threshold = 0.5)
+    cv_misclassification(model, k = 10)
   }, error = function(e) {
     message("[get_detail_reg_log] CV misclassification failed: ", conditionMessage(e))
     NULL
   })
   
-  tab_glance$CV_misclassification_rate <- if (!is.null(cv_res)) cv_res$misclassification_rate else NA_real_
-
+  tab_glance$CV_accuracy_rate <- if (!is.null(cv_res)) cv_res$cv_accuracy else NA_real_
+  tab_glance$CV_misclassification_rate <- if (!is.null(cv_res)) cv_res$cv_misclassification else NA_real_
+  
 
   #### Graph Diag ####
   
