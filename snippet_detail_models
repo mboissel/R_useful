@@ -1,0 +1,1540 @@
+#### Functions diagnostic of regression models  ####
+
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(lme4)
+library(lmerTest)
+library(DHARMa)
+library(pROC)
+
+#### lm : Diag functions diagnostic for linear model ####
+
+#' get_detail_LM
+#' 
+#' Get detail and diagnostic graph for a linear modeling
+#' 
+#' @param model [lm]: A 'stats::lm' model
+#' 
+#' @return A named list.
+#' 
+#'   tab_coef : provide beta, IC (Student t-based) and pvalues
+#'   
+#'   tab_glance : provide several metrics including : 
+#'     Shapi_resid_pval : if > 0.05, residuals are normally distributed.
+#'       (uses Kolmogorov-Smirnov instead of Shapiro-Wilk when n > 5000)
+#'     Breusch_Pagan_pval : if > 0.05, homoscedasticity respected.
+#'     Fisher_pval : if < 0.05, at least one beta != 0, pertinence of the model.
+#'     multicol_conclu : "ok"/"fail" based on adjusted VIF (SE_factor) > sqrt(5).
+#'       Uses adjusted VIF rather than raw VIF, as it is the only metric comparable 
+#'       across numeric predictors and categorical predictors with >2 levels 
+#'       (Fox & Monette 1992).
+#'       
+#'   vif_info : output of performance::multicollinearity(), NULL if less than 2 predictors.
+#'     Report and interpret SE_factor (adjusted VIF), not raw VIF, as soon as the model 
+#'     contains a categorical predictor with 3+ levels.
+#'     
+#'   patch_gg_diag : Graphs gathered in a patchwork 
+#'     gg1_Fitted_vs_Residual : if the points appear to be randomly distributed 
+#'       around 0 and without any particular pattern (for example, no cone or curve), 
+#'       this suggests that the homoscedasticity is respected. 
+#'       If a cone or fan shape is observed, this suggests heteroscedasticity.
+#'     gg2_Scale_Location : uses standardized residuals (rstandard). 
+#'       Same interpretation logic as gg1, on a variance-stabilized scale.
+#'     gg3_Density_Residuals and gg4_norm_qqplot : used to check normality of residuals.
+#'     gg5_Residuals_vs_Leverage : uses standardized residuals. 
+#'       Presents residuals and their influence / aberrant observations.
+#'     gg6_Cooks_Distances : A distance greater than 0.5 (or 1) is problematic.
+#'   
+#'   quick_advice : looking at normality and homoscedasticity 
+#'   
+#' @example
+#' lmmodel <- lm(
+#'   Sepal.Length ~ Sepal.Width + Petal.Length + Petal.Width + Species,
+#'   data = iris
+#' )
+#' lmmodel # model evaluated
+#' # then get the diag :
+#' diag_model <- get_detail_LM(lmmodel)
+#' diag_model$patch_gg_diag
+#' diag_model$tab_glance
+#' diag_model$tab_coef
+#' diag_model$quick_advice
+#' 
+get_detail_LM <- function(model) {
+  
+  message("[get_detail_LM] Detail for Linear Model ")
+  stopifnot(class(model) %in% "lm")
+  # message(
+  #   "[get_detail_LM] stats::lm "#,
+  #   # as.character(print(model$call))[[2]]
+  # )
+  # summary(model)
+  
+  #### Get coef ####
+  
+  tab_coef <- as.data.frame(
+    broom::tidy(model) 
+  )
+  # tab_coef
+  # broom::tidy(conf.int = TRUE) # or 
+  # tab_coef$lowerCI <- tab_coef$estimate - 1.96 * tab_coef$`std.error`
+  # tab_coef$upperCI <- tab_coef$estimate + 1.96 * tab_coef$`std.error`
+  # Student better... 1.96 sous estime l'IC
+  tval <- qt(0.975, df = model$df.residual)
+  tab_coef$lowerCI <- tab_coef$estimate - tval * tab_coef$std.error
+  tab_coef$upperCI <- tab_coef$estimate + tval * tab_coef$std.error
+  
+  #### Check hypothesis model ####
+
+  tab_glance <- as.data.frame(performance::model_performance(model = model))
+  tab_glance$N <- nrow(model$model)
+  
+  if (tab_glance$N > 5000) {
+    tab_glance$ks_resid_pval <- ks.test(
+      unique(residuals(model)), "pnorm",
+      mean = mean(residuals(model)), sd = sd(residuals(model))
+    )$p.value
+    tab_glance$norm_conclu <- ifelse(
+      tab_glance$ks_resid_pval > 0.05, "ok", # normal
+      "fail"
+    )
+  } else {
+    tab_glance$Shapi_resid_pval <- shapiro.test(residuals(model))$p.value
+    # if p-valeur > 0.05 => residuals appear as normally distributed => ok
+    # Fr : cela suggère que la normalité est respectée 
+    tab_glance$norm_conclu <- ifelse(
+      tab_glance$Shapi_resid_pval > 0.05, "ok", # normal
+      "fail"
+    )
+  }
+  # alternative :
+  # performance::check_normality(model)
+  
+  
+  tab_glance$Breusch_Pagan_pval <- lmtest::bptest(model, studentize = TRUE)$p.value
+  # Interprétation : 
+  # if la p-valeur > 0.05 => Error variance appears to be homoscedastic => ok 
+  # Fr : cela suggère que l'homoscédasticité est respectée 
+  # (les variances des résidus sont constantes).
+  # IF p-valeur < 0.05, This indicates heteroscedasticity (non-constant variances).
+  # Fr : cela indique une hétéroscédasticité (variances non constantes).
+  
+  tab_glance$homosc_conclu <- ifelse(
+    tab_glance$Breusch_Pagan_pval > 0.05, "ok", # homoscedastic
+    "fail"
+  )
+  
+  # alternative :
+  # Test de White pour l'hétéroscédasticité
+  # ou Test de White (alternative robuste)
+  # bptest(reg.step, ~ fitted(model) + I(fitted(model)^2))
+  # alternative 
+  # performance::check_heteroscedasticity(model)
+  
+  tab_glance$Fisher_pval <- pf(
+    q = summary(model)$fstatistic[["value"]],
+    df1 = summary(model)$fstatistic[["numdf"]],
+    df2 = summary(model)$fstatistic[["dendf"]],
+    lower.tail = FALSE
+  )
+  # Interprétation : 
+  # fisher test : H0 : al beta = 𝟎 vs H1 : There is at least one non-null coefficient.
+  # If H0 is rejected, it means that the model is relevant.
+  tab_glance$relevance_conclu <- ifelse(
+    tab_glance$Fisher_pval < 0.05, "ok", # model is relevant.
+    "fail"
+  )
+  
+  #### Multicolinéarité ####
+  tab_glance$n_pred <- length(attr(terms(model), "term.labels"))
+  if (tab_glance$n_pred >= 2) {
+    # vif_info <- car::vif(model)
+    vif_info <- performance::multicollinearity(model)
+    # use adjusted VIF = SE_factor
+    # Interprétation
+    # If every predictor in your model is numeric or a 2-level factor, 
+    # VIF and adjusted VIF tell you the same story
+    # As soon as you have any categorical predictor with 3+ levels 
+    # you should report and interpret the adjusted VIF, 
+    # using the √-thresholds (when thresholds can be 3, 5, 10 commonly)
+    # eg. adjusted GVIF > 3.16, corresponding to a conventional VIF > 10 ...
+    tab_glance$multicol_conclu <- ifelse(
+      any(vif_info$SE_factor>sqrt(5)), # sqrt(5)  # ≈ 2.236
+      "fail", 
+      "ok"
+    )
+  } else {
+    vif_info <- NULL
+  }
+  
+  #### Graph Diag ####
+  # library(ggplot2)
+  
+  tab_augment <- data.frame(
+    .resid = model$residuals,
+    .resid_std = rstandard(model), # résidu standardisé (rstandard()) divise chaque résidu par son écart-type estimé
+    .fitted = model$fitted.values,
+    .hat = hatvalues(model),
+    .cooksd = cooks.distance(model)
+  )
+  
+  # par(mfrow = c(2, 2));
+  # plot(model);
+  # par(mfrow = c(1, 1));
+  
+  #### gg1 **Residuals vs Fitted** ####
+  # plot(model,1)
+  gg1_Fitted_vs_Residual <- ggplot2::ggplot(tab_augment, ggplot2::aes(x = .fitted, y = .resid)) +
+    ggplot2::geom_point() +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    ggplot2::geom_smooth(method = 'loess', se = FALSE) +
+    ggplot2::ggtitle("Fitted vs Residual") +
+    ggplot2::labs(y = "Residuals", x = "Fitted values") +
+    ggplot2::theme_light()
+  gg1_Fitted_vs_Residual
+  
+  # Interprétation : Si les points semblent répartis de manière aléatoire autour de 0 et
+  # sans motif particulier (par exemple, pas de cône ou de courbe),
+  # cela suggère que l'homoscédasticité est respectée.
+  # Si on observe une forme de cône ou d'éventail, cela suggère une hétéroscédasticité.
+  
+  #### gg2 **Constant Leverage: Residuals vs Factor Levels**  ####
+  # plot(model,3)
+  gg2_Scale_Location <- ggplot2::ggplot(
+    data = tab_augment, aes(x = .fitted, y = sqrt(abs(.resid_std)))
+  ) +
+    ggplot2::geom_point() +
+    ggplot2::geom_smooth(method = 'loess', se = FALSE) +
+    ggplot2::ggtitle("Scale-Location") +
+    # ggplot2::labs(y = "sqrt(|Standardized Residuals|)", x = "Fitted values") +
+    ggplot2::labs(y = expression(sqrt(abs(`Standardized Residuals`))), x = "Fitted values") +
+    ggplot2::theme_light()
+  gg2_Scale_Location
+  
+  ## --interpretation gg1 et gg2
+  # Les résidus sont indépendants. 
+  # Les résidus ne doivent pas être corrélés entre eux.
+  # De la même façon, les résidus ne doivent pas être corrélés au facteur étudié.
+  # On peut faire le test de Dubin-Watson pour vérifier l'autocorrélation des résidus mais souvent un contrôle graphique suffit.    
+  
+  #### gg3 density resid ####
+  
+  # plot(model,2)
+  
+  # Les résidus suivent une loi normale de moyenne 0. 
+  # Pour vérifier cette hypothèse on peut faire un test de normalité comme le test de Shapiro-Wilk
+  # mais on préfère vérifier cela graphiquement avec un diagramme Quantile-Quantile 
+  # (i.e. QQ-plot, graphique dans lequel les quantiles de deux distributions sont tracés l’un par rapport à l’autre).
+  
+  gg3_Density_Residuals<- ggpubr::ggdensity(
+    tab_augment[[".resid"]]
+  ) +
+    ggplot2::labs(
+      title = "Density plot for residuals",
+      subtitle = paste0(
+        # "shapiro.test p=", formatC(shapiro.test(residuals(model))$p.value)
+        "shapiro.test p=", formatC(tab_glance$Shapi_resid_pval)
+      ),
+      x = "Residuals"
+    ) +
+    ggplot2::theme_light()
+  gg3_Density_Residuals
+
+  #### gg4 QQplot ####
+  # qqnorm(residuals(model))
+  gg4_norm_qqplot <- ggpubr::ggqqplot(tab_augment[[".resid"]], add = "qqline") +
+    ggplot2::ggtitle(
+      paste0("Normal qqplot"),
+      subtitle = paste0(
+        "N=", length(tab_augment[[".resid"]])
+      )
+    ) +
+    ggplot2::theme_light()
+  gg4_norm_qqplot
+  
+  #### gg5 Leverage ####
+
+  # plot(rstudent(model) ~ hatvalues(model), main = "residuals vs leverage")
+  gg5_Residuals_vs_Leverage <- ggplot2::ggplot(
+    data = tab_augment,
+    mapping = aes(x = .hat, y = .resid_std)
+  ) +
+    ggplot2::geom_point() +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    ggplot2::geom_vline(
+      xintercept = 2 * mean(tab_augment[[".hat"]], na.rm = TRUE),
+      linetype = "dashed", color = "pink"
+    ) + 
+    ggplot2::geom_smooth(method = 'loess', se = FALSE) +
+    ggplot2::geom_abline(slope = 0, intercept = 0) +  # Ligne droite à y = 0
+    ggplot2::ggtitle("Std Residuals vs Leverage") +
+    ggplot2::theme_light()
+  gg5_Residuals_vs_Leverage
+  ## --interpreatation
+  ## The usual rule-of-thumb is that values greater than two or three times the average leverage (at least for the linear model) should be checked.
+  
+  ## presents the residues and their influence or aberrant observations
+  ## distance Cook: A distance greater than 0.5 is problematic.
+  
+  #### gg6 dist cook ####
+  # plot(model,4)
+  # sum(cooks.distance(model) > 0.5)
+  # plot(cooks.distance(model))
+  gg6_Cooks_Distances <- ggplot2::ggplot(
+    data = tab_augment,
+    mapping = aes(y = .cooksd, x = as.factor(rownames(tab_augment)))
+  ) +
+    ggplot2::geom_point() +
+    # ggplot2::geom_hline(yintercept = 0.5, linetype="dashed", color = "pink") +
+    # ggplot2::geom_hline(yintercept = 1, linetype="dashed", color = "red") +
+    ggplot2::labs(
+      x = "",
+      title = "Cooks Distances",
+      subtitle = paste0(
+        "N=", nrow(tab_augment),
+        " / n=", sum(tab_augment[[".cooksd"]] > 1, na.rm = TRUE), " cook's dist > 1."
+      )
+    ) +
+    ggplot2::scale_x_discrete(labels = NULL, breaks = NULL) +
+    ggplot2::labs(y = "Cook's distance", x = "Obs. number") +
+    ggplot2::theme_light()
+  gg6_Cooks_Distances
+  if (sum(tab_augment[[".cooksd"]] > 1, na.rm = TRUE) > 0) {
+    gg6_Cooks_Distances <- gg6_Cooks_Distances + 
+      ggplot2::geom_hline(yintercept = 1, linetype = "dashed", color = "red") 
+  }
+  if (sum(tab_augment[[".cooksd"]] > 0.5, na.rm = TRUE) > 0) {
+    gg6_Cooks_Distances <- gg6_Cooks_Distances + 
+      ggplot2::geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") 
+  }
+  
+  ## A rule of thumb is that an observation has high influence 
+  # if Cook’s distance exceeds 4/(n - p - 1)(P. Bruce and Bruce 2017),
+  # where n is the number of observations and p the number of predictor variables.
+  ## other rule : percentile : 10-20 %
+    # tmp_per <- as.data.frame(quantile(tab_augment[[".cooksd"]], c(0.1, 0.2)))
+  # if (sum(tab_augment[[".cooksd"]] > tmp_per[1,1], na.rm = TRUE) > 0) {
+  #   gg6_Cooks_Distances <- gg6_Cooks_Distances + 
+  #     ggplot2::geom_hline(yintercept = tmp_per[2,1], linetype="dashed", color = "grey20") +
+  #     ggplot2::geom_hline(yintercept = tmp_per[1,1], linetype="dashed", color = "grey10")
+  # }
+  gg6_Cooks_Distances <- gg6_Cooks_Distances + 
+    ggplot2::geom_hline(yintercept = 4/nrow(tab_augment), linetype = "dashed", color = "grey20") 
+  gg6_Cooks_Distances
+  
+  #### global graph patchwork ####
+  # library(patchwork)
+  patch_gg_diag <- (
+    (gg1_Fitted_vs_Residual + gg2_Scale_Location) /
+      (gg3_Density_Residuals + gg4_norm_qqplot) /
+      (gg5_Residuals_vs_Leverage + gg6_Cooks_Distances)
+  )
+  patch_gg_diag
+  
+  title_call <- as.character( model$call )[[2]]
+  patch_gg_diag <- patch_gg_diag + patchwork::plot_annotation(
+    subtitle = title_call
+    # title = '',
+    # subtitle = '',
+    # caption = 'Disclaimer: ...'
+  )
+  # patch_gg_diag
+  
+  #### quick_advice ####
+  quick_advice <- "NotGood!"
+  if (tab_glance$norm_conclu %in% "ok" & tab_glance$homosc_conclu %in% "ok") {
+    quick_advice <- "Good! Normality ok and homoscedasticity ok."
+  }
+  if (tab_glance$norm_conclu %in% "fail" & tab_glance$homosc_conclu %in% "fail") {
+    quick_advice <- "Normality fail and homoscedasticity fail. Troubleshooting: Try log transformation of Y ?"
+  }
+  if (tab_glance$norm_conclu %in% "fail" & tab_glance$homosc_conclu %in% "ok") {
+    quick_advice <- "Normality fail and homoscedasticity ok. Troubleshooting: Try boostrat ? boot.pval::boot_summary(model, R = 999)"
+  }
+  if (tab_glance$norm_conclu %in% "ok" & tab_glance$homosc_conclu %in% "fail") {
+    quick_advice <- "Normality ok and heteroscedasticity fail. Troubleshooting: Try robust SE (sandwich::vcovHC) or WLS."
+  }
+  message("[get_detail_LM] ", quick_advice)
+  
+  ## res list
+  results <- list(
+    "model" = model,
+    "call" = model$call,
+    "summary" = summary(model),
+    "vif_info" = vif_info,
+    "tab_coef" = tab_coef,
+    "tab_glance" = tab_glance,
+    # provide each gg or the global patchwork :
+    "patch_gg_diag" = patch_gg_diag,
+    "quick_advice" = quick_advice
+  )
+  return(results)
+}
+
+#### Exemple LM ####
+if (FALSE) {
+  
+  lmmodel <- lm(
+    Sepal.Length ~ Sepal.Width + Petal.Length + Petal.Width + Species,
+    data = iris
+  )
+  lmmodel # model evaluated
+  
+  # then get the diag :
+  diag_model <- get_detail_LM(lmmodel)
+  # get each element of the diag more specifically
+  # graph patchwork :
+  diag_model$patch_gg_diag
+  # glance of stats
+  diag_model$tab_glance
+  # coef table
+  diag_model$tab_coef
+  # quick advice to conclude  
+  diag_model$quick_advice
+  # modele provided in argument, if needed : 
+  diag_model$model # = lmmodel
+  
+  tabres <- diag_model$tab_coef
+  tabres$n <- nrow(lmmodel$model)
+  tabres$norm_conclu <- diag_model$tab_glance$nrom_conclu
+  
+  ## strategy possible... ##
+  
+  # if filter wanted of cooksd and bootstrap # 
+  ## si pb de normalité, test impact val abbérante
+  if (!unique(tabres$norm_conclu)) {
+    # data_graph[.cooksd > 1, ]
+    message("=> remove extrem values (.cooksd)")
+    data_graph <- cbind(lmmodel$model, diag_model$patch_gg_diag[[3]]$data)
+
+    # retirer les valeurs influentes
+    # data_graph_mm <- data_graph[data_graph[[".hat"]] < 2 * mean(data_graph[[".hat"]], na.rm = TRUE), ]
+    
+    # retirer les valeurs abbérantes
+    data_graph_mm <- data_graph[data_graph[[".cooksd"]] < 1, ]
+    rm(lmmodel)
+    lmmodel <- lm(
+      formula = as.formula(as.character(lmmodel$call)[[2]]),
+      data = data_graph_mm # avec le jeu de donnée filtré
+    )
+    diag_model <- get_detail_LM(lmmodel)
+    
+    tabres <- diag_model$tab_coef
+    tabres$n <- nrow(lmmodel$model)
+    tabres$norm_conclu <- diag_model$tab_glance$nrom_conclu
+    
+    ## bootstrap ##
+    ## si malgré le filtre sur les valeurs abbérantes, pb de norm : bootstrap
+    if (!unique(tabres$norm_conclu)) { 
+      message("=> need boot...")
+      boot_res <- boot.pval::boot_summary(lmmodel, R = 999)  
+      boot_res <-  data.table::setDT(boot_res, keep.rownames = "term")
+      boot_res <- boot_res %>% 
+        dplyr::rename(estimate_boot = Estimate) %>% 
+        dplyr::rename(lowerCI_boot = Lower.bound) %>% 
+        dplyr::rename(upperCI_boot = Upper.bound) %>% 
+        dplyr::rename(p.value_boot = p.value)
+      tabres <- merge(tabres, boot_res,by = "term", all = TRUE)
+    }
+    
+  }
+  
+  tabres
+  # return(tabres)
+  
+}
+
+
+#### glm logistic : Diagnostic function of a logistic GLM binomial model ####
+
+#' get_detail_reg_log
+#' 
+#' Get detail and diagnostic graph for a logistic modeling
+#' In logistic regression, it is not relevant to verify residual normality or homoscedasticity.
+#' Important checks in logistic regression include: 
+#'   multicollinearity (adjusted VIF), overall fit quality (chi2 deviance test),
+#'   goodness of fit (Hosmer-Lemeshow), pseudo-R2, complete/quasi-complete separation,
+#'   classification performance (ROC/AUC), and calibration (slope/intercept, calibration plot).
+#' 
+#' @param model [glm]: A 'stats::glm' model, family binomial
+#' 
+#' @return A named list.
+#' 
+#'   tab_coef : provide beta, IC (via confint), OR and OR's IC, and pvalues
+#'   
+#'   tab_glance : provide several metrics including : 
+#'     pseudoR2_Nagelkerke : pseudo R2 between 0 and 1.
+#'     chi2_deviance_pval : Chi2 test for overall adjustment quality (null deviance vs residual deviance). 
+#'       If < 0.05, good fit : this means that the model with the explanatory variables
+#'       fits significantly better to the data than the null model, indicating that the explanatory 
+#'       variables have a significant effect on the response variable.
+#'     hoslem_pval : Hosmer-Lemeshow goodness of fit test (g = 5 bins).
+#'       If > 0.05, the model is considered correctly fitted. Note: this test is sensitive to 
+#'       the number of bins chosen and is a known limitation; interpret as indicative, not definitive.
+#'     n_pred : number of predictor terms in the model.
+#'     multicol_conclu : "ok"/"fail" based on adjusted VIF (SE_factor) > sqrt(5). "ok" by default 
+#'       if less than 2 predictors (vif_info is then NULL).
+#'     max_abs_se / separation_suspected : flags a suspected complete/quasi-complete separation 
+#'       when the maximum coefficient standard error exceeds an indicative threshold (10). 
+#'       For a more rigorous test, see package detectseparation (Konis test).
+#'     AUC / AUC_CI_low / AUC_CI_high : Area Under the ROC Curve (DeLong method for CI), 
+#'       measures discrimination. AUC = 0.5 : no discrimination ; AUC >= 0.7 : acceptable 
+#'       discrimination (usual convention).
+#'     calib_intercept / calib_slope : calibration on training data, obtained by regressing 
+#'       the outcome on the logit of fitted probabilities. Intercept ~ 0 and slope ~ 1 indicate 
+#'       good calibration. Slope < 1 suggests overfitting (predictions too extreme), 
+#'       slope > 1 suggests underfitting (predictions too conservative).
+#'       NOTE: this calibration is apparent (computed on training data), not internally/externally
+#'       validated. For validated calibration, use cross-validation or bootstrap (e.g. rms::validate()).
+#'     calib_conclu : "ok"/"fail" based on calib_intercept and calib_slope proximity to 0 / 1.
+#'     
+#'   vif_info : output of performance::multicollinearity(), NULL if less than 2 predictors.
+#'     Report and interpret SE_factor (adjusted VIF), not raw VIF, as soon as the model 
+#'     contains a categorical predictor with 3+ levels (Fox & Monette 1992).
+#'
+#'   patch_gg_diag : Graphs gathered in a patchwork 
+#'     gg1_Fitted_vs_Residual : Pearson residuals vs fitted probabilities. Less directly 
+#'       interpretable than for a linear model, since points form two curved bands (Y=0 / Y=1).
+#'     gg1bis_Binned_Residuals : Pearson residuals averaged by bin of fitted probability 
+#'       (binned residual plot, similar to arm::binnedplot), with +/- 2 SE error bars. 
+#'       About 95% of points should fall within the error bars; a trend across bins or 
+#'       systematic outliers suggests a functional form problem (missing transformation, 
+#'       non-linear term, or interaction).
+#'     gg5_Residuals_vs_Leverage : presents Pearson residuals and their influence / aberrant observations. 
+#'     gg6_Cooks_Distances : A distance greater than 0.5 (or 1) is problematic.
+#'     gg_roc : ROC curve with AUC and its 95% CI.
+#'     gg_calibration : calibration plot (mean predicted probability vs observed proportion, 
+#'       by decile of fitted probability). Points should follow the diagonal; systematic deviation 
+#'       below the diagonal indicates the model overestimates risk in that range, above indicates 
+#'       underestimation.
+#'   
+#'   quick_advice : accumulates all detected issues (separation, goodness of fit, multicollinearity,
+#'     calibration, discrimination, overall model significance) into a single message; 
+#'     returns "Good!" only if none of these checks fail.
+#'   
+#' @example
+#' tmp_bin <- iris[1:100,]
+#' tmp_bin$random <- rnorm(n = 100, mean = 20, sd = 3) # bruit
+#' tmp_bin$bin_Species <- as.factor(ifelse(tmp_bin$Species %in% "setosa", 1, 0))
+#' tmp_bin$bin_Species[1:5] <- 0 # bruit
+#' tmp_bin$bin_Species[95:100] <- 1 # bruit
+#' model_reg <- glm(
+#'   bin_Species ~ Petal.Length + Sepal.Length + random,
+#'   data = tmp_bin,
+#'   family = binomial(link = "logit")
+#' )
+#' model_reg # model evaluated
+#' # then get the diag :
+#' diag_model <- get_detail_reg_log(model_reg)
+#' diag_model$patch_gg_diag
+#' diag_model$tab_glance
+#' diag_model$tab_coef
+#' diag_model$quick_advice
+get_detail_reg_log <- function(model) {
+  
+  message("[get_detail_reg_log] Detail for Logistic Model ")
+  stopifnot("glm" %in% class(model))
+  stopifnot("binomial" %in% model$family$family)
+  message(
+    "[get_detail_reg_log] glm binomial"#,
+    # as.character(print(model$call))[[2]]
+  )
+  # summary(model)
+  
+  #### Get coef ####
+  
+  tab_coef <- as.data.frame(broom::tidy(model))
+  # tab_coef
+  ci_raw <- confint(model)
+  CItab <- as.data.frame(ci_raw)
+  names(CItab) <- c("lowerCI", "upperCI")
+  CItab$term <- row.names(CItab)
+  tab_coef <- merge(tab_coef, CItab, by = "term", all.x = TRUE, sort = FALSE)
+  # dplyr::left_join(tab_coef, CItab, by = "term")
+  # exp(beta) = OR, wanted ? 
+  OR_tab <- as.data.frame(exp(cbind(coef(model), ci_raw)))
+  names(OR_tab) <- c("OR", "OR_lowerCI", "OR_upperCI")
+  tab_coef <- cbind(tab_coef, OR_tab)
+  tab_coef
+  
+  #### Check hypothesis model ####
+  
+  tab_glance <- as.data.frame(performance::model_performance(model = model))
+  
+  # Normalité des résidus : Shapi_resid_pval # not applicable :
+  # Régression logistique : En régression logistique, la variable dépendante est binaire (ou catégorielle), 
+  # donc les résidus ne sont pas supposés suivre une distribution normale. 
+  # Les résidus ne sont pas distribués de manière normale en régression logistique,
+  # car la sortie est la probabilité d'appartenance à une classe, ce qui ne suit pas une distribution gaussienne.
+  
+  tab_glance$pseudoR2_Nagelkerke <- performance::r2_nagelkerke(model = model)
+  
+  #### Test de la qualité d'ajustement global : Test de déviance ####
+  # Question posée :
+  # "Mes variables explicatives apportent-elles collectivement une information utile,
+  # par rapport à un modèle sans aucun prédicteur ?"
+  
+  # test_dev <- anova(model, test = "Chisq") # Test du chi-deux pour la qualité de l'ajustement global
+  # la déviance résiduelle et la déviance nulle
+  
+  deviance_residuelle <- model$deviance   # Deviance du modèle ajusté
+  deviance_nulle <- model$null.deviance   # Deviance du modèle nul
+  # Différence de déviance = Deviance nulle - Deviance résiduelle
+  # Cette différence suit une distribution du chi² avec des degrés de liberté correspondant à
+  # la différence entre le nombre de paramètres dans le modèle nul et le modèle ajusté.
+  # Calcul de la différence de déviance
+  diff_deviance <- deviance_nulle - deviance_residuelle
+  # Calcul des degrés de liberté
+  df_diff <- model$df.null - model$df.residual
+  # Calcul de la p-value globale avec la distribution du chi²
+  tab_glance$chi2_deviance_pval <- pchisq(diff_deviance, df = df_diff, lower.tail = FALSE)
+  # --interpretation 
+  # if p-value < 0.05, cela signifie que le modèle avec les variables explicatives s'ajuste significativement mieux aux données que le modèle nul,
+    # ce qui indique que les variables explicatives ont un effet significatif sur la variable réponse.
+  # if p-value est élevée, cela suggère que les variables explicatives n'améliorent pas significativement l'ajustement par rapport au modèle nul.
+  tab_glance$relevance_conclu <- ifelse(
+    tab_glance$chi2_deviance_pval < 0.05,
+    "ok", 
+    "fail"
+  )
+
+  #### Test goodness of fit ####
+  # Question posée : 
+  # "Les probabilités prédites par mon modèle correspondent-elles vraiment aux fréquences observées dans les données ?"
+  
+  g_bins <- 5  
+  tab_glance$hoslem_pval <- ResourceSelection::hoslem.test(
+    model$y, model$fitted.values, g = g_bins
+  )$p.value
+  # validation du modèle  # si p-valeur > 0.05, le modèle est correctement fitté
+  tab_glance$goodness_fit_conclu <- ifelse(
+    tab_glance$hoslem_pval > 0.05, 
+    "ok", # goodness of fit
+    "fail"
+  )
+  
+  #### Multicolinéarité ####
+  tab_glance$n_pred <- length(attr(terms(model), "term.labels"))
+  if (tab_glance$n_pred >= 2) {
+    # important ++ dans les reg logistique
+    # vif_info <- car::vif(model)
+    vif_info <- performance::multicollinearity(model)
+    # use adjusted VIF = SE_factor
+    # Interprétation
+    # If every predictor in your model is numeric or a 2-level factor, 
+    # VIF and adjusted VIF tell you the same story
+    # As soon as you have any categorical predictor with 3+ levels 
+    # you should report and interpret the adjusted VIF, 
+    # using the √-thresholds (when thresholds can be 3, 5, 10 commonly)
+    # eg. adjusted GVIF > 3.16, corresponding to a conventional VIF > 10 ...
+    tab_glance$multicol_conclu <- ifelse(
+      any(vif_info$SE_factor>sqrt(5)), # sqrt(5)  # ≈ 2.236
+      "fail", 
+      "ok"
+    )
+  } else {
+    vif_info <- NULL
+    tab_glance$multicol_conclu <- "ok"
+  }
+  
+  #### Perfect separation ####
+  tab_glance$max_abs_se <- max(abs(tab_coef$std.error), na.rm = TRUE)
+  tab_glance$separation_suspected <- tab_glance$max_abs_se > 10  # seuil indicatif, à ajuster
+  # détection plus rigoureuse, voir package detectseparation (test de Konis).
+  
+
+  #### Graph Diag ####
+  
+  tab_augment <- data.frame(
+    # .resid = model$residuals, # résidus ordinaires
+    pearson_residuals = residuals(model, type = "pearson"),
+    .fitted = predict(model, type = "response"),
+    .hat = hatvalues(model),
+    .cooksd = cooks.distance(model)
+  )
+  
+  # par(mfrow = c(2, 2));
+  # plot(model);
+  # par(mfrow = c(1, 1));
+  
+  #### gg1 **Residuals vs Fitted** ####
+  # # plot(model,1)
+  gg1_Fitted_vs_Residual <- ggplot2::ggplot(tab_augment, ggplot2::aes(x = .fitted, y = pearson_residuals)) +
+    ggplot2::geom_point() +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    ggplot2::geom_smooth(method = 'loess', se = FALSE) +
+    ggplot2::ggtitle("Fitted vs Residual") +
+    ggplot2::labs(y = "Residuals", x = "Fitted values") +
+    ggplot2::theme_light()
+  gg1_Fitted_vs_Residual
+  # # un graphique des résidus de Pearson par rapport aux valeurs ajustées (fitted values)
+  # # pour vérifier l'ajustement global du modèle. Si le modèle est correct,
+  # # les résidus ne devraient pas montrer de tendance évidente 
+  # # (ils devraient être aléatoirement dispersés autour de zéro).
+  
+  ## plus pertinent pour y bin :
+  # arm::binnedplot()
+  # gg1bis_Binned_Residuals <- patchwork::wrap_elements(
+  #   full = ~ arm::binnedplot(tab_augment$.fitted, tab_augment$pearson_residuals)
+  # )
+  
+  #### gg1bis Binned residuals ####
+  n_bins <- min(round(sqrt(nrow(tab_augment))), 20)  # règle de pouce arm::binnedplot
+  
+  # binned_df <- tab_augment |>
+  #   dplyr::mutate(bin = ggplot2::cut_number(.fitted, n = n_bins)) |>
+  #   dplyr::group_by(bin) |>
+  #   dplyr::summarise(
+  #     mean_fitted = mean(.fitted),
+  #     mean_resid  = mean(pearson_residuals),
+  #     se_resid    = sd(pearson_residuals) / sqrt(dplyr::n()),
+  #     n_obs       = dplyr::n(),
+  #     .groups = "drop"
+  #   )
+  tab_augment_dt <- data.table::as.data.table(tab_augment)
+  tab_augment_dt[, bin := ggplot2::cut_number(.fitted, n = n_bins)]
+  binned_df <- tab_augment_dt[
+    , .(
+      mean_fitted = mean(.fitted),
+      mean_resid  = mean(pearson_residuals),
+      se_resid    = sd(pearson_residuals) / sqrt(.N),
+      n_obs       = .N
+    ),
+    by = bin
+  ]
+  
+  gg1bis_Binned_Residuals <- ggplot2::ggplot(
+    binned_df, ggplot2::aes(x = mean_fitted, y = mean_resid)
+  ) +
+    ggplot2::geom_point() +
+    ggplot2::geom_errorbar(
+      ggplot2::aes(ymin = mean_resid - 2 * se_resid, ymax = mean_resid + 2 * se_resid),
+      width = 0
+    ) +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+    ggplot2::labs(
+      title = "Binned residual plot",
+      subtitle = paste0(n_bins, " bins"),
+      x = "Average fitted probability", y = "Average Pearson residual"
+    ) +
+    ggplot2::theme_light()
+  gg1bis_Binned_Residuals
+  
+  #### gg5 Leverage ####
+  
+  # plot(rstudent(model) ~ hatvalues(model), main = "residuals vs leverage")
+  # plot(model, which = 5)
+  gg5_Residuals_vs_Leverage <- ggplot2::ggplot(
+    data = tab_augment,
+    mapping = aes(x = .hat, y = pearson_residuals)
+  ) +
+    ggplot2::geom_point() +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    ggplot2::geom_vline(
+      xintercept = 2 * mean(tab_augment[[".hat"]], na.rm = TRUE),
+      linetype = "dashed", color = "pink"
+    ) + 
+    ggplot2::geom_smooth(method = 'loess', se = FALSE) +
+    ggplot2::geom_abline(slope = 0, intercept = 0) +  # Ligne droite à y = 0
+    ggplot2::ggtitle("Residuals vs Leverage") +
+    ggplot2::theme_light()
+  gg5_Residuals_vs_Leverage
+  ## --interpreatation
+  ## presents the residues and their influence or aberrant observations
+  ## distance Cook: A distance greater than 0.5 is problematic.
+  
+  #### gg6 dist cook ####
+  # plot(model,4)
+  # sum(cooks.distance(model) > 0.5)
+  # plot(cooks.distance(model))
+  gg6_Cooks_Distances <- ggplot2::ggplot(
+    data = tab_augment,
+    mapping = aes(y = .cooksd, x = as.factor(rownames(tab_augment)))
+  ) +
+    ggplot2::geom_point() +
+    # ggplot2::geom_hline(yintercept = 0.5, linetype="dashed", color = "pink") +
+    # ggplot2::geom_hline(yintercept = 1, linetype="dashed", color = "red") +
+    ggplot2::labs(
+      x = "",
+      title = "Cooks Distances",
+      subtitle = paste0(
+        "N=", nrow(tab_augment),
+        " / n=", sum(tab_augment[[".cooksd"]] > 1, na.rm = TRUE), " cook's dist > 1."
+      )
+    ) +
+    ggplot2::scale_x_discrete(labels = NULL, breaks = NULL) +
+    ggplot2::labs(y = "Cook's distance", x = "Obs. number") +
+    ggplot2::theme_light()
+  if (sum(tab_augment[[".cooksd"]] > 1, na.rm = TRUE) > 0) {
+    gg6_Cooks_Distances <- gg6_Cooks_Distances + 
+      ggplot2::geom_hline(yintercept = 1, linetype="dashed", color = "red") 
+  }
+  if (sum(tab_augment[[".cooksd"]] > 0.5, na.rm = TRUE) > 0) {
+    gg6_Cooks_Distances <- gg6_Cooks_Distances + 
+      ggplot2::geom_hline(yintercept = 0.5, linetype="dashed", color = "red") 
+  }
+  gg6_Cooks_Distances
+  ## A rule of thumb is that an observation has high influence 
+  # if Cook’s distance exceeds 4/(n - p - 1)(P. Bruce and Bruce 2017),
+  # where n is the number of observations and p the number of predictor variables.
+  ## other rule : percentile : 10-20 %
+  # tmp_per <- as.data.frame(quantile(tab_augment[[".cooksd"]], c(0.1, 0.2)))
+  # if (sum(tab_augment[[".cooksd"]] > tmp_per[1,1], na.rm = TRUE) > 0) {
+  #   gg6_Cooks_Distances <- gg6_Cooks_Distances + 
+  #     ggplot2::geom_hline(yintercept = tmp_per[2,1], linetype="dashed", color = "grey20") + 
+  #     ggplot2::geom_hline(yintercept = tmp_per[1,1], linetype="dashed", color = "grey10") 
+  # }
+  gg6_Cooks_Distances <- gg6_Cooks_Distances + 
+    ggplot2::geom_hline(yintercept = 4/nrow(tab_augment), linetype = "dashed", color = "grey20") 
+  gg6_Cooks_Distances
+  
+  #### gg7 Roc curve #### 
+  roc_obj <- pROC::roc(
+    response = model$y,
+    predictor = tab_augment$.fitted,
+    quiet = TRUE
+  )
+  tab_glance$AUC <- as.numeric(pROC::auc(roc_obj))
+  tab_glance$AUC_CI_low  <- as.numeric(pROC::ci.auc(roc_obj, method = "delong"))[1]
+  tab_glance$AUC_CI_high <- as.numeric(pROC::ci.auc(roc_obj, method = "delong"))[3]
+  # Note : pROC::ci.auc() utilise le bootstrap par défaut (2000 réplications) :
+  #   potentiellement lent sur un gros modèle. 
+  #   Use method = "delong" pour un calcul analytique plus rapide si besoin
+
+  # graph
+  gg_roc <- pROC::ggroc(roc_obj, legacy.axes = TRUE) +
+    ggplot2::geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey50") +
+    ggplot2::labs(
+      title = "ROC Curve",
+      subtitle = paste0(
+        "AUC = ", formatC(tab_glance$AUC, digits = 3, format = "f"),
+        " [", formatC(tab_glance$AUC_CI_low, digits = 3, format = "f"), 
+        "-", formatC(tab_glance$AUC_CI_high, digits = 3, format = "f"), "]"
+      ),
+      x = "1 - Specificity", y = "Sensitivity"
+    ) +
+    ggplot2::theme_light()
+  gg_roc
+  
+  #### Calibrage ####
+  
+  # Deux éléments complémentaires : un graphe de calibrage (probabilités prédites vs observées par decile) et
+  # les calibration slope/intercept (référence standard, Steyerberg).
+  # a) Calibration slope & intercept (référence : régresser Y sur le logit des probas prédites)
+  logit_fitted <- qlogis(tab_augment$.fitted)  # transformation logit
+  calib_model <- glm(model$y ~ logit_fitted, family = binomial)
+  
+  tab_glance$calib_intercept <- coef(calib_model)[1]
+  tab_glance$calib_slope     <- coef(calib_model)[2]
+  # Interprétation : 
+  # intercept ≈ 0 et slope ≈ 1 => bon calibrage
+  # slope < 1 => sur-ajustement (overfitting), prédictions trop extrêmes
+  # slope > 1 => sous-ajustement, prédictions trop prudentes
+  tab_glance$calib_conclu <- ifelse(
+    test = abs(tab_glance$calib_intercept) < 0.5 & 
+      tab_glance$calib_slope > 0.8 & tab_glance$calib_slope < 1.2,
+    # intercept ≈ 0 et slope ≈ 1 => bon calibrage
+    # borne test à ajuster au besoin...
+    "ok", 
+    "fail"
+  )
+  
+  # b) Graphe calibrage par déciles de probabilité prédite
+  calib_dt <- data.table::data.table(
+    fitted = tab_augment$.fitted,
+    observed = model$y
+  )
+  calib_dt[, decile := ggplot2::cut_number(fitted, n = 10)]
+  calib_df <- calib_dt[
+    , .(
+      mean_predicted = mean(fitted),
+      mean_observed  = mean(observed),
+      n_obs = .N
+    ),
+    by = decile
+  ]
+  
+  #### gg 8 Calibrage graph ####
+  
+  gg_calibration <- ggplot2::ggplot(calib_df, ggplot2::aes(x = mean_predicted, y = mean_observed)) +
+    ggplot2::geom_point(ggplot2::aes(size = n_obs)) +
+    ggplot2::geom_line() +
+    ggplot2::geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey50") +
+    ggplot2::labs(
+      title = "Calibration plot",
+      subtitle = paste0(
+        "Intercept = ", formatC(tab_glance$calib_intercept, digits = 3, format = "f"),
+        " / Slope = ", formatC(tab_glance$calib_slope, digits = 3, format = "f")
+      ),
+      x = "Mean predicted probability", y = "Observed proportion"
+    ) +
+    ggplot2::theme_light() +
+    ggplot2::guides(size = "none")
+  # Interprétation : les points doivent suivre la diagonale. 
+  # Un écart systématique en dessous de la diagonale = le modèle surestime le risque dans cette tranche ;
+  # au-dessus = il le sous-estime.
+  
+  # internal note : 
+  #   Un point de vigilance méthodologique important : ce calibrage (slope/intercept, courbe, ROC) 
+  # est calculé sur les données d'entraînement — c'est donc une mesure de calibrage apparent, 
+  # presque toujours optimiste (surtout si tu as beaucoup de prédicteurs relatif à N). 
+  # Pour un vrai diagnostic de calibrage, il faudrait idéalement une validation croisée
+  # ou un bootstrap interne (rms::validate() fait ça très bien). Si get_detail_reg_log() 
+  # sert surtout à un contrôle rapide en cours de modélisation, 
+  # c'est un choix pragmatique acceptable — mais à documenter clairement dans le nom 
+  # de la fonction ou en commentaire, pour ne pas laisser croire que c'est un calibrage validé en externe.
+  
+  #### global graph patchwork ####
+  # library(patchwork)
+  patch_gg_diag <- (
+    (gg1_Fitted_vs_Residual + gg1bis_Binned_Residuals) /
+      (gg5_Residuals_vs_Leverage + gg6_Cooks_Distances) /
+      (gg_roc + gg_calibration)
+  )
+  # patch_gg_diag
+  
+  patch_gg_diag <- patch_gg_diag + patchwork::plot_annotation(
+    subtitle = as.character(model$call)[[2]]
+    # title = '',
+    # subtitle = '',
+    # caption = 'Disclaimer: ...'
+  )
+  patch_gg_diag
+  
+  #### quick_advice ####
+  
+  advice_flags <- character(0)
+  
+  if (isTRUE(tab_glance$separation_suspected)) {
+    advice_flags <- c(
+      advice_flags, 
+      "Possible complete/quasi-complete separation (huge SE) : model estimates unreliable. Check detectseparation::detect_separation()."
+    )
+  }
+  
+  if (tab_glance$goodness_fit_conclu %in% "fail") {
+    advice_flags <- c(
+      advice_flags, 
+      "Badness of fit (Hosmer-Lemeshow) : model calibration questionable at the deciles level."
+    )
+  }
+  
+  if (!tab_glance$multicol_conclu %in% "fail") {
+    advice_flags <- c(
+      advice_flags, 
+      "Multicollinearity detected (adj. VIF > sqrt(5)) : consider removing correlated predictors (stepAIC, VIF-based selection)."
+    )
+  }
+  
+  if (tab_glance$calib_conclu %in% "fail") {
+    advice_flags <- c(
+      advice_flags, 
+      "Poor calibration (slope/intercept off target) : check overfitting, consider penalized regression (ridge/lasso) or recalibration."
+    )
+  }
+  
+  if (tab_glance$AUC < 0.7) {
+    advice_flags <- c(
+      advice_flags, 
+      paste0("Low discrimination (AUC = ", formatC(tab_glance$AUC, digits = 2, format = "f"), ") : model may not separate classes well.")
+    )
+  }
+  
+  if (tab_glance$relevance_conclu %in% "fail") {
+    advice_flags <- c(
+      advice_flags, 
+      "Model does not improve significantly over the null model (chi2 deviance test)."
+    )
+  }
+  
+  quick_advice <- if (length(advice_flags) == 0) {
+    "Good! No major issue detected (fit, calibration, multicollinearity, separation, discrimination)."
+  } else {
+    paste(advice_flags, collapse = " | ")
+  }
+  
+  message("[get_detail_reg_log] ", quick_advice)
+  
+  
+  #### res list ####
+  results <- list(
+    "model" = model,
+    "call" = model$call,
+    "summary" = summary(model),
+    "tab_coef" = tab_coef,
+    "tab_glance" = tab_glance,
+    "vif_info" = vif_info,
+    # provied each gg or the global patchwork :
+    "patch_gg_diag" = patch_gg_diag,
+    "quick_advice" = quick_advice
+  )
+  return(results)
+}
+
+#### Exemple Reg log ####
+if (FALSE) {
+  
+  tmp_bin <- iris[1:100,]
+  set.seed(42)
+  tmp_bin$random <- rnorm(n = 100, mean = 20, sd = 3) # bruit
+  tmp_bin$bin_Species <- as.factor(ifelse(tmp_bin$Species %in% "setosa", 1, 0))
+  tmp_bin$bin_Species[1:5] <- 0 # bruit
+  tmp_bin$bin_Species[95:100] <- 1 # bruit
+  model_reg <- glm(
+    bin_Species ~ Petal.Length + Sepal.Length + random,
+    data = tmp_bin,
+    family = binomial(link = "logit")
+  )
+  
+  model_reg # model evaluated
+  # then get the diag :
+  diag_model <- get_detail_reg_log(model_reg)
+  # get each element of the diag more specifically
+  # graph patchwork :
+  diag_model$patch_gg_diag
+  # glance of stats
+  diag_model$tab_glance
+  # coef table
+  diag_model$tab_coef
+  # quick adivice to conclude  
+  diag_model$quick_advice
+  # modele provided in argument, if needed : 
+  diag_model$model # = model_reg
+
+}
+
+#### lmer : Fonction diagnostic d'un modèle mixte linéaire lme4::lmer ####
+# used to deploy a standardized diagnostic after a linear mixte modeling
+
+#' get_detail_LMM
+#' 
+#' Get detail and diagnostic graph for a linear mixed modeling
+#' 
+#' @param model [lmerMod / lmerModLmerTest]: A 'lme4::lmer' or 'lmerTest::lmer' model
+#' @param IDENT_PAT [character]: The column name identifying the clustering unit 
+#'   (e.g. patient ID) used for the random effect, and used to label gg6_Cooks_Distances.
+#' 
+#' @return A named list.
+#' 
+#'   tab_coef : fixed effects (broom.mixed::tidy, effects = "fixed"), including estimate, 
+#'     std.error, statistic, df, p.value (Satterthwaite, via internal conversion to 
+#'     lmerModLmerTest if needed), conf.low, conf.high.
+#'   
+#'   tab_glance : provide several metrics including :
+#'   
+#'     isSingular : TRUE if the model fit is singular, i.e. variances of one or more 
+#'       linear combinations of random effects are (close to) zero. A singular fit usually 
+#'       indicates an over-parameterized random effects structure (too many random slopes/
+#'       intercepts relative to the data) and warrants simplifying the random effects.
+#'     N : number of observations used in the model's dataset.
+#'     norm_conclu : normality test on residuals.
+#'       Uses Shapiro-Wilk if N <= 5000, Kolmogorov-Smirnov otherwise. If conclu = "ok" 
+#'       (pval > 0.05), residuals are considered normally distributed.
+#'     Disp_sim_pval / Disp_sim_conclu : DHARMa::testDispersion, tests global over/under-
+#'       dispersion via simulated residuals. Mostly relevant for GLMM (Poisson, binomial) 
+#'       where variance is constrained by the mean. If conclu = "ok" (pval > 0.05), 
+#'       no dispersion issue detected.
+#'     TestQuantiles_pval / TestQuantiles_conclu : DHARMa::testQuantiles, tests whether 
+#'       residual variance changes across the range of fitted values (heteroscedasticity 
+#'       pattern, "cone/funnel" shape). Complementary to Disp_sim. If conclu = "ok" 
+#'       (pval > 0.05), residual variance appears homogeneous across fitted values.
+#'     heteroscedasticity_p / heteroscedasticity_conclu : performance::check_heteroscedasticity, 
+#'       alternative heteroscedasticity check. Not fully validated for all merMod cases; 
+#'       verify it runs correctly on your model class/version before relying on it.
+#'     n_pred : number of fixed-effect predictor terms in the model.
+#'     multicol_conclu : "ok"/"fail" based on adjusted VIF (SE_factor, from 
+#'       performance::multicollinearity) > sqrt(5). "ok" by default if less than 2 predictors 
+#'       (vif_info is then NULL). Uses adjusted VIF rather than raw VIF, as it is the only 
+#'       metric comparable across numeric predictors and categorical predictors with >2 levels 
+#'       (Fox & Monette 1992).
+#'   
+#'   vif_info : output of performance::multicollinearity(), NULL if less than 2 predictors.
+#'     Report and interpret SE_factor (adjusted VIF), not raw VIF, as soon as the model 
+#'     contains a categorical predictor with 3+ levels.
+#'
+#'   patch_gg_diag : Graphs gathered in a patchwork 
+#'     gg1_Fitted_vs_Residual : residuals vs fitted values. Randomly dispersed around 0, 
+#'       no funnel/cone shape expected if homoscedasticity is respected.
+#'     gg2_Scale_Location : sqrt(|residuals|) vs fitted values. An increasing trend suggests 
+#'       heteroscedasticity.
+#'     gg3_Density_Residuals and gg4_norm_qqplot : used to check normality of residuals 
+#'       (fixed-effect level, i.e. model residuals).
+#'     gg7_ranef_qqplot : QQ-plot of the random effects (BLUPs), faceted by grouping variable 
+#'       and term (intercept / slope). Checks the normality assumption on the random effects 
+#'       themselves — distinct from, and complementary to, residual normality (gg3/gg4).
+#'     gg5_Residuals_vs_Leverage : residuals vs hat values (.hat), presents residuals and 
+#'       their influence / aberrant observations.
+#'     gg6_Cooks_Distances : Cook's distance by observation (grouped/labeled by IDENT_PAT). 
+#'       A distance greater than 0.5 (or 1) is problematic.
+#'   
+#'   quick_advice : accumulates all detected issues (residual normality, dispersion, 
+#'     heteroscedasticity pattern, multicollinearity, singular fit) into a single message; 
+#'     returns "Good!" only if none of these checks fail.
+#' 
+#' @example
+#' iris_mm <- iris
+#' iris_mm$IDENT_PAT <- as.factor(rep(1:(nrow(iris)/3), each = 3))
+#' iris_mm$Visite_fact <- as.factor(rep(1:3, 50))
+#' iris_mm$Visite_time <- as.numeric(iris_mm$Visite_fact)
+#' form_i <- "Sepal.Length ~ Sepal.Width + Visite_fact + (Visite_time|IDENT_PAT)"
+#' lmmodel <- lme4::lmer(
+#'   as.formula(form_i),
+#'   data = iris_mm,
+#'   REML = FALSE,
+#'   control = lmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B'))
+#' )
+#' mmodel # model evaluated
+#' # then get the diag :
+#' diag_model <- get_detail_LMM(mmodel)
+#' diag_model$patch_gg_diag
+#' diag_model$tidy_summary
+#' diag_model$tab_glance
+#' diag_model$tab_coef
+#' 
+get_detail_LMM <- function(model, IDENT_PAT = "IDENT_PAT") {
+  
+  message("[get_detail_LMM] Detail for Linear mixted models ")
+  # stopifnot(class(model) %in%  c("lmerMod", "lmerTest", "lmerModLmerTest"))
+  stopifnot(inherits(model, c("lmerMod", "lmerTest", "lmerModLmerTest")))
+  message(
+    "[get_detail_LMM] lme4::lmer ",
+    as.character(model@call)[[2]]
+  )
+  
+  # Conversion en lmerModLmerTest si besoin (pour obtenir les p-values Satterthwaite)
+  model_lmertest <- if (!inherits(model, "lmerModLmerTest")) {
+    lmerTest::as_lmerModLmerTest(model)
+  } else {
+    model
+  }
+  
+  #### Get coef ####
+  
+  # tab_coef <- as.data.frame(
+  #   lmerTest:::get_coefmat(model)
+  # ) %>%
+  #   tibble::rownames_to_column() %>%
+  #   dplyr::rename(fixed_effect = rowname)
+  # 
+  # tab_coef$lowerCI <- tab_coef$Estimate - 1.96 * tab_coef$`Std. Error`
+  # tab_coef$upperCI <- tab_coef$Estimate + 1.96 * tab_coef$`Std. Error`
+ 
+  tab_coef <- broom.mixed::tidy(
+    model_lmertest, effects = "fixed", conf.int = TRUE
+  )
+  
+  tab_augment <- broom.mixed::augment(model)
+  # names(tab_augment)[grep(IDENT_PAT, names(tab_augment))] <- "IDENT_PATIENT"
+  ## grep partiel, risky
+  names(tab_augment)[names(tab_augment) == IDENT_PAT] <- "IDENT_PATIENT"
+  
+  # A more precise estimate is obtained on the basis of the "Pearson residuals"
+  # Pearson residuals are residues standardized by
+  # the theoretical standard deviation of the predicted values
+  # tab_augment$resid_pearson <- residuals(model, type = "pearson")
+  # all(tab_augment$resid_pearson == tab_augment[[".resid"]])
+  # head(as.data.frame(tab_augment))
+  
+  #### Check hypothesis model ####
+  
+  ## diag message isSingular ##
+  # lme4::isSingular(model2) #
+  ## --interpretation
+  ## if TRUE model is singular i.e.
+  ## variances of one or more linear combinations of effects are (close to) zero.
+  
+  tab_glance <- cbind(
+    broom.mixed::glance(model),
+    data.frame(isSingular = lme4::isSingular(model))
+  )
+  tab_glance$N <- nrow(model@frame)
+  
+  if (tab_glance$N > 5000) {
+    tab_glance$ks_resid_pval <- ks.test(
+      unique(residuals(model)), "pnorm",
+      mean = mean(residuals(model)), sd = sd(residuals(model))
+    )$p.value
+    tab_glance$norm_conclu <- ifelse(
+      tab_glance$ks_resid_pval > 0.05, "ok", # normal
+      "fail"
+    )
+  } else {
+    tab_glance$Shapi_resid_pval <- shapiro.test(residuals(model))$p.value
+    # if p-valeur > 0.05 => residuals appear as normally distributed => ok
+    # Fr : cela suggère que la normalité est respectée 
+    tab_glance$norm_conclu <- ifelse(
+      tab_glance$Shapi_resid_pval > 0.05, "ok", # normal
+      "fail"
+    )
+  }
+  # alt 
+  # performance::check_normality(model)
+  
+  ## homosc?
+  
+  sim_res <- DHARMa::simulateResiduals(model, plot = FALSE)
+  
+  # Test de dispersion globale (sur/sous-dispersion) : 
+  # pertinent surtout pour GLMM (Poisson, binomial) où la variance est contrainte par la moyenne.
+  disp_test <- DHARMa::testDispersion(sim_res, plot = FALSE)
+  tab_glance$Disp_sim_pval <- disp_test$p.value
+  tab_glance$Disp_sim_conclu <- ifelse(
+    tab_glance$Disp_sim_pval > 0.05, "ok", "fail"
+  )
+  
+  # Test de pattern d'hétéroscédasticité (variance qui change selon les valeurs prédites) :
+  # complémentaire à testDispersion, plus proche du diagnostic "cone/entonnoir" recherché en LM classique.
+  # Si significatif (p < 0.05),
+  # la variance des résidus n'est pas homogène le long du gradient de valeurs prédites.
+  quantile_test <- DHARMa::testQuantiles(sim_res, plot = FALSE)
+  tab_glance$TestQuantiles_pval <- quantile_test$p.value
+  tab_glance$TestQuantiles_conclu <- ifelse(
+    tab_glance$TestQuantiles_pval > 0.05, "ok", "fail"
+  )
+
+  # alt 
+  test_heterosc <- performance::check_heteroscedasticity(model)
+  tab_glance$heteroscedasticity_p <- as.numeric(test_heterosc)
+  tab_glance$heteroscedasticity_conclu <- ifelse(
+    tab_glance$heteroscedasticity_p > 0.05, 
+    "ok", 
+    "fail"
+  )
+  
+  #### Multicolinéarité ####
+  tab_glance$n_pred <- length(attr(terms(model), "term.labels"))
+  if (tab_glance$n_pred >= 2) {
+    # important ++ dans les reg logistique
+    # vif_info <- car::vif(model)
+    vif_info <- performance::multicollinearity(model)
+    # use adjusted VIF = SE_factor
+    # Interprétation
+    # If every predictor in your model is numeric or a 2-level factor, 
+    # VIF and adjusted VIF tell you the same story
+    # As soon as you have any categorical predictor with 3+ levels 
+    # you should report and interpret the adjusted VIF, 
+    # using the √-thresholds (when thresholds can be 3, 5, 10 commonly)
+    # eg. adjusted GVIF > 3.16, corresponding to a conventional VIF > 10 ...
+    tab_glance$multicol_conclu <- ifelse(
+      any(vif_info$SE_factor>sqrt(5)), # sqrt(5)  # ≈ 2.236
+      "fail", 
+      "ok"
+    )
+  } else {
+    vif_info <- NULL
+    tab_glance$multicol_conclu <- "ok"
+  }
+  
+  
+  #### Graphs ####
+  
+  #### gg1 Fitted_vs_Residual ####
+  
+  ## Hyp 1 ## homoscédasticité des résidus
+  ## fitted vs residual with smooth line added
+  # plot(model)
+  # plot(
+  #   model, type=c("p","smooth"), col.line=1,
+  #   main = "Fitted vs Residual"
+  # )
+  gg1_Fitted_vs_Residual <- ggplot2::ggplot(tab_augment, aes(x = .fitted, y = .resid)) +
+    ggplot2::geom_point() +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    ggplot2::geom_smooth(method = 'loess', se = FALSE) +
+    ggplot2::ggtitle("Fitted vs Residual") +
+    # ggplot2::labs(y = "Pearson residuals") +
+    ggplot2::theme_light()
+  gg1_Fitted_vs_Residual
+  ## --interpretation
+  ## If the residues are randomly dispersed around the 0 line, the relationship is linear and the mean of the residues is 0. ; good news
+  ## If the residues form an approximate horizontal band around the 0 line, the residue variance is homogeneous (therefore, they are homoscedastic). ; good news
+  ## If the residues are organized in funnel form, the residues are not homoscedastic. ; heterosedasticity problem
+  
+  #### gg2 Scale_Location ####
+  
+  ## Hyp 2 ## scale-location plot = Échelle localisée
+  # plot(
+  #   model,
+  #   sqrt(abs(resid(.)))~fitted(.), type=c("p","smooth"),
+  #   col.line=1, main = "Scale-Location"
+  # )
+  gg2_Scale_Location <- ggplot2::ggplot(
+    data = tab_augment, aes(x = .fitted, y = sqrt(abs(.resid)))
+  ) +
+    ggplot2::geom_point() +
+    ggplot2::geom_smooth(method = 'loess', se = FALSE) +
+    ggplot2::ggtitle("Scale-Location") +
+    ggplot2::theme_light()
+  gg2_Scale_Location
+  ## --interpretation :
+  # check whether residue dispersion increases for a given predicted value
+  # If the dispersion increases, the basic condition of homoscedasticity is not met
+  # Not a good news if marked trend
+  
+  #### gg3 gg4 norm ####
+  
+  ## Hyp 3 ## Normalité des résidus + viz Q-Q plot
+  
+  ## shapiro.test(residuals(model))
+  ## --interpretation shapiro :
+  ## p<0.05 => The assumption of normality is therefore rejected
+  ## p>0.05 => no proof of non normality = normality is therefore tolerated
+  
+  # hist(residuals(model),breaks = 20)
+  ## ggplot density
+  gg3_Density_Residuals <- ggpubr::ggdensity(
+    tab_augment[[".resid"]]
+  ) +
+    ggplot2::labs(
+      title = "Density plot for residuals",
+      subtitle = paste0("shapiro.test p=", formatC(tab_glance$Shapi_resid_pval)),
+      x = "Residuals"
+    ) +
+    ggplot2::theme_light()
+  gg3_Density_Residuals
+  # qqnorm(residuals(model))
+  # qqline(residuals(model))
+  ## also : lattice::qqmath(model)
+  ## ggplot qqnorm
+  gg4_norm_qqplot <- ggpubr::ggqqplot(tab_augment[[".resid"]], add = "qqline") +
+    ggplot2::ggtitle(
+      paste0("Normal qqplot"),
+      subtitle = paste0(
+        "N=", length(tab_augment[[".resid"]])
+      )
+    ) +
+    ggplot2::theme_light()
+  gg4_norm_qqplot
+  
+  #### gg5 gg5 Leverage CookD ####
+  
+  ## Hyp 4 ## residuals vs leverage = Résidus vs effet de levier
+  
+  # plot(model, rstudent(.) ~ hatvalues(.), main = "residuals vs leverage")
+  gg5_Residuals_vs_Leverage <- ggplot2::ggplot(
+    data = tab_augment,
+    mapping = aes(x = .hat, y = .resid)
+  ) +
+    ggplot2::geom_point() +
+    ggplot2::geom_vline(
+      xintercept = 2 * mean(tab_augment[[".hat"]], na.rm = TRUE),
+      linetype = "dashed", color = "pink"
+    ) + 
+    ggplot2::ggtitle("Residuals vs Leverage") +
+    ggplot2::theme_light()
+  gg5_Residuals_vs_Leverage
+  
+  ## --interpretation
+  ## presents the residues and their influence or aberrant observations
+  ## distance Cook: A distance greater than 0.5 is problematic.
+  
+  # sum(cooks.distance(model) > 0.5)
+  # plot(cooks.distance(model))
+  gg6_Cooks_Distances <- ggplot2::ggplot(
+    data = tab_augment,
+    mapping = aes(y = .cooksd, x = IDENT_PATIENT)
+  ) +
+    ggplot2::geom_point() +
+    ggplot2::geom_hline(yintercept = 0.5, linetype="dashed", color = "pink") +
+    ggplot2::geom_hline(yintercept = 1, linetype="dashed", color = "red") +
+    ggplot2::labs(
+      x = "",
+      title = "Cooks Distances",
+      subtitle = paste0(
+        "N=", nrow(tab_augment),
+        " / n=", sum(tab_augment[[".cooksd"]] > 1,na.rm = TRUE), " cook's dist > 1."
+      )
+    ) +
+    ggplot2::scale_x_discrete(labels = NULL, breaks = NULL) +
+    ggplot2::theme_light()
+  gg6_Cooks_Distances
+  ## A rule of thumb is that an observation has high influence 
+  # if Cook’s distance exceeds 4/(n - p - 1)(P. Bruce and Bruce 2017),
+  # where n is the number of observations and p the number of predictor variables.
+  ## other rule : percentile : 10-20 %
+  # tmp_per <- as.data.frame(quantile(tab_augment[[".cooksd"]], c(0.1, 0.2)))
+  # if (sum(tab_augment[[".cooksd"]] > tmp_per[1,1], na.rm = TRUE) > 0) {
+  #   gg6_Cooks_Distances <- gg6_Cooks_Distances + 
+  #     ggplot2::geom_hline(yintercept = tmp_per[2,1], linetype="dashed", color = "grey20") +
+  #     ggplot2::geom_hline(yintercept = tmp_per[1,1], linetype="dashed", color = "grey10")
+  # }
+  gg6_Cooks_Distances <- gg6_Cooks_Distances + 
+    ggplot2::geom_hline(yintercept = 4/nrow(tab_augment), linetype = "dashed", color = "grey20") 
+  gg6_Cooks_Distances
+  
+  
+  #### gg7 QQ-plot des effets aléatoires (BLUPs) ####
+  
+  ## Normalité des effets aléatoire ##
+  
+  # gg7_ranef_qqplot <- lattice::qqmath(lme4::ranef(model))
+  
+  ranef_df <- as.data.frame(lme4::ranef(model))
+  # colonnes attendues : grpvar, term, grp, condval, condsd
+  
+  gg7_ranef_qqplot <- ggplot2::ggplot(ranef_df, ggplot2::aes(sample = condval)) +
+    ggplot2::stat_qq() +
+    ggplot2::stat_qq_line() +
+    ggplot2::facet_wrap(~ grpvar + term, scales = "free") +
+    ggplot2::labs(
+      title = "QQ-plot of random effects (BLUPs)",
+      x = "Theoretical quantiles", y = "Random effect estimates"
+    ) +
+    ggplot2::theme_light()
+  gg7_ranef_qqplot
+  
+  #### patchwork ####
+  
+  # library(patchwork)
+  # patch_gg_diag <- (
+  #   (gg1_Fitted_vs_Residual + gg2_Scale_Location) /
+  #     (gg3_Density_Residuals + gg4_norm_qqplot) /
+  #     (gg5_Residuals_vs_Leverage + gg6_Cooks_Distances)
+  # )
+  patch_gg_diag <- (
+    (gg1_Fitted_vs_Residual + gg2_Scale_Location) /
+      (gg3_Density_Residuals + gg4_norm_qqplot + gg7_ranef_qqplot) /
+      (gg5_Residuals_vs_Leverage + gg6_Cooks_Distances)
+  )
+
+  patch_gg_diag <- patch_gg_diag + patchwork::plot_annotation(
+    subtitle = paste0(paste0(as.character(model@call)[1:2], collapse = "("), ")")
+    # title = '',
+    # subtitle = '',
+    # caption = 'Disclaimer: ...'
+  )
+  
+  patch_gg_diag
+  
+  #### quick_advice ####
+  
+  quick_advice <- "NotGood!"
+  if (tab_glance$norm_conclu %in% "ok" & tab_glance$heteroscedasticity_p > 0.05) {
+    message("[get_detail_LMM] Normality ok and homoscedasticity ok")
+    quick_advice <- "Good! Normality ok and homoscedasticity ok."
+  }
+  if (tab_glance$norm_conclu %in% "fail" & tab_glance$heteroscedasticity_p < 0.05) {
+    # Si testDispersion(sim_res) est significatif (p < 0.05) → il y a une hétéroscédasticité.
+    message("[get_detail_LMM] Normality fail and homoscedasticity fail")
+    quick_advice <- "Normality fail and homoscedasticity fail. Troubleshooting: Try log transformation of Y ?"
+  }
+  if (tab_glance$norm_conclu %in% "fail" & tab_glance$heteroscedasticity_p > 0.05) {
+    message("[get_detail_LMM] Normality fail and homoscedasticity ok")
+    quick_advice <- "Normality fail and homoscedasticity ok. Troubleshooting: check/filter extrem .cooksd, see bootstrap... "
+  }
+  if (isTRUE(tab_glance$isSingular)) {
+    quick_advice <- paste(
+      quick_advice, 
+      "| Singular fit: random effects structure likely over-parameterized (simplify random slopes/intercepts)."
+    )
+  }
+  
+  
+  
+  ## res list
+  results <- list(
+    "model" = model,
+    "call" = model@call,
+    "summary" = broom.mixed::tidy(model),
+    "vif_info" = vif_info,
+    "tab_coef" = tab_coef,
+    "tab_glance" = tab_glance,
+    # provied each gg or the global patchwork :
+    "patch_gg_diag" = patch_gg_diag, 
+    "quick_advice" = quick_advice
+  )
+  
+  return(results)
+}
+
+#### Exemple LMM ####
+if (FALSE) {
+  
+  iris_mm <- iris
+  iris_mm$IDENT_PAT <- as.factor(rep(1:(nrow(iris)/3), each = 3))
+  iris_mm$Visite_fact <- as.factor(rep(1:3, 50))
+  iris_mm$Visite_time <- as.numeric(iris_mm$Visite_fact)
+  tail(iris_mm)
+  form_i <- "Sepal.Length ~ Sepal.Width + Visite_fact + (Visite_time|IDENT_PAT)"
+  mmodel <- lme4::lmer(
+    as.formula(form_i),
+    data = iris_mm,
+    REML = FALSE,
+    control = lmerControl(optimizer ='optimx', optCtrl=list(method='L-BFGS-B'))
+  )
+  mmodel # model evaluated
+  model <- mmodel
+  # then get the diag :
+  diag_model <- get_detail_LMM(mmodel)
+  # get each element of the diag more specifically
+  # graph patchwork :
+  diag_model$patch_gg_diag
+  # glance of stats
+  diag_model$tab_glance
+  # coef table
+  diag_model$tab_coef
+  # quick adivice to conclude  
+  diag_model$quick_advice
+  # modele provided in argument, if needed : 
+  diag_model$summary
+  diag_model$model # = mmodel
+  coef_tab <- diag_model$tab_coef
+  tabres <- setDT(coef_tab[!coef_tab$term %in% "(Intercept)", ]) # ignore intercept ? 
+  tabres[["df"]] <- NULL
+  tabres[["statistic"]] <- NULL
+  tabres$Y <- "Sepal.Length"
+  tabres$form <- form_i
+  tabres$ok_norm <- diag_model$tab_glance$norm_conclu %in% "ok"
+  tabres$n <- diag_model$tab_glance$N
+  
+  ## si pb de normalité, test impact val abbérante
+  if (!unique(tabres$ok_norm)) {
+    # data_graph[.cooksd > 1, ]
+    message("=> remove extrem values (.cooksd)")
+    data_graph <- setDT(diag_model$patch_gg_diag$patches$plots[[3]]$data)
+    
+    # retirer les valeurs influentes : hats ? 
+    
+    # retirer les valeurs abbérantes
+    data_graph_mm <- data_graph[.cooksd < 1, ]
+    
+    data_graph_mm$IDENT_PAT <- data_graph_mm$IDENT_PATIENT
+    
+    rm(mmodel)
+    mmodel <- lme4::lmer(
+      as.formula(form_i), 
+      data = data_graph_mm
+    )
+    rm(diag_model)
+    diag_model <- get_detail_LMM(mmodel, IDENT_PAT = "IDENT_PAT") # without extreme val
+    coef_tab <- diag_model$tab_coef
+    message("=> upadate tab res")
+    tabres <- setDT(coef_tab[!coef_tab$term %in% "(Intercept)", ]) # ignore intercept ? 
+    tabres[["df"]] <- NULL
+    tabres[["statistic"]] <- NULL
+    tabres$Y <- "Sepal.Length"
+    tabres$form <- form_i
+    tabres$ok_norm <- diag_model$tab_glance$norm_conclu %in% "ok"
+    tabres$n <- nrow(data_graph_mm)
+    
+    ## bootstrap ##
+    if (!unique(tabres$ok_norm)) { 
+      message("=> need boot...")
+      
+      boot_res <- boot.pval::boot_summary(mmodel, R = 999, method = "parametric") # or method = "semiparametric"  
+      boot_res <-  setDT(boot_res, keep.rownames = "term")
+      boot_res <- boot_res[!boot_res$term %in% "(Intercept)", ] %>% 
+        dplyr::rename(estimate_boot = Estimate) %>% 
+        dplyr::rename(lowerCI_boot = Lower.bound) %>% 
+        dplyr::rename(upperCI_boot = Upper.bound) %>% 
+        dplyr::rename(P_valeur_boot = p.value)
+      tabres <- merge(tabres, boot_res,by = "term", all = TRUE)
+    }
+    
+  }
+  
+  tabres
+  
+}
