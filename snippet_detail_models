@@ -959,7 +959,7 @@ get_detail_reg_log <- function(model, g_bins = 5) {
     )
   }
   
-  if (!tab_glance$multicol_conclu %in% "fail") {
+  if (tab_glance$multicol_conclu %in% "fail") {
     advice_flags <- c(
       advice_flags, 
       "Multicollinearity detected (adj. VIF > sqrt(5)) : consider removing correlated predictors (stepAIC, VIF-based selection)."
