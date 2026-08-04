@@ -576,7 +576,9 @@ get_detail_reg_log <- function(model, g_bins = 5) {
   # car la sortie est la probabilité d'appartenance à une classe, ce qui ne suit pas une distribution gaussienne.
   
   tab_glance$pseudoR2_Nagelkerke <- performance::r2_nagelkerke(model = model)
-  
+
+  tab_glance$N <- nrow(model$model)
+
   #### Test de la qualité d'ajustement global : Test de déviance ####
   # Question posée :
   # "Mes variables explicatives apportent-elles collectivement une information utile,
