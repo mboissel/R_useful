@@ -459,7 +459,13 @@ if (FALSE) {
 #'   classification performance (ROC/AUC), and calibration (slope/intercept, calibration plot).
 #' 
 #' @param model [glm]: A 'stats::glm' model, family binomial
-#' 
+#' @param g_bins [interger] : number of bins to use to calculate quantiles (arg g in hoslem.test(x, y, g = 10)).
+#'  Needs to be at least 2. The degrees of freedom of the test is g-2 but the 
+#'  number of bins might also depend on the data (i.e. due to identical quantile 
+#'  values that lead to empty bins). In case when the number of bins does not 
+#'  equal g, the degrees of freedom will depend on the number of bins that is 
+#'  less than g. In such case a warning is produced.
+#'  
 #' @return A named list.
 #' 
 #'   tab_coef : provide beta, IC (via confint), OR and OR's IC, and pvalues
@@ -532,7 +538,7 @@ if (FALSE) {
 #' diag_model$tab_glance
 #' diag_model$tab_coef
 #' diag_model$quick_advice
-get_detail_reg_log <- function(model) {
+get_detail_reg_log <- function(model, g_bins = 5) {
   
   message("[get_detail_reg_log] Detail for Logistic Model ")
   stopifnot("glm" %in% class(model))
@@ -604,16 +610,44 @@ get_detail_reg_log <- function(model) {
   # Question posée : 
   # "Les probabilités prédites par mon modèle correspondent-elles vraiment aux fréquences observées dans les données ?"
   
-  g_bins <- 5  
-  tab_glance$hoslem_pval <- ResourceSelection::hoslem.test(
-    model$y, model$fitted.values, g = g_bins
-  )$p.value
-  # validation du modèle  # si p-valeur > 0.05, le modèle est correctement fitté
-  tab_glance$goodness_fit_conclu <- ifelse(
-    tab_glance$hoslem_pval > 0.05, 
-    "ok", # goodness of fit
-    "fail"
-  )
+ # g_bins <- 5  
+  ## attention , exemple fail avec g = 5 si 
+  # fitted.values ne prend qu'un petit nombre de valeurs distinctes. 
+  # cut() (utilisé en interne par hoslem.test via les quantiles) 
+  # ne peut alors pas créer 5 groupes réellement différents
+  n_distinct_fitted <- length(unique(round(model$fitted.values, 6)))
+  g_bins <- min(g_bins, n_distinct_fitted - 1)  # -1 pour garder une marge, à ajuster
+  if (g_bins < 3) {
+    message("Skip hoslem.test : Trop peu de valeurs prédites distinctes pour un test HL fiable.")
+    # tab_glance$hoslem_pval <- NA
+    # tab_glance$goodness_fit_conclu <- NA
+  } #else {
+  #   tab_glance$hoslem_pval <- ResourceSelection::hoslem.test(
+  #     model$y, model$fitted.values, g = g_bins
+  #   )$p.value
+  #   # validation du modèle  # si p-valeur > 0.05, le modèle est correctement fitté
+    # tab_glance$goodness_fit_conclu <- ifelse(
+    #   tab_glance$hoslem_pval > 0.05,
+    #   "ok", # goodness of fit
+    #   "fail"
+    # )
+  # }
+
+  tab_glance$hoslem_pval <- tryCatch({
+    ResourceSelection::hoslem.test(model$y, model$fitted.values, g = g_bins)$p.value
+  }, error = function(e) {
+    message("[get_detail_reg_log] Hosmer-Lemeshow test failed: ", conditionMessage(e))
+    NA_real_
+  })
+  if (is.na(tab_glance$hoslem_pval)) {
+    tab_glance$goodness_fit_conclu <- NA
+  } else {
+    tab_glance$goodness_fit_conclu <- ifelse(
+      tab_glance$hoslem_pval > 0.05,
+      "ok", # goodness of fit
+      "fail"
+    )
+  }
   
   #### Multicolinéarité ####
   tab_glance$n_pred <- length(attr(terms(model), "term.labels"))
@@ -683,18 +717,16 @@ get_detail_reg_log <- function(model) {
   #### gg1bis Binned residuals ####
   n_bins <- min(round(sqrt(nrow(tab_augment))), 20)  # règle de pouce arm::binnedplot
   
-  # binned_df <- tab_augment |>
-  #   dplyr::mutate(bin = ggplot2::cut_number(.fitted, n = n_bins)) |>
-  #   dplyr::group_by(bin) |>
-  #   dplyr::summarise(
-  #     mean_fitted = mean(.fitted),
-  #     mean_resid  = mean(pearson_residuals),
-  #     se_resid    = sd(pearson_residuals) / sqrt(dplyr::n()),
-  #     n_obs       = dplyr::n(),
-  #     .groups = "drop"
-  #   )
   tab_augment_dt <- data.table::as.data.table(tab_augment)
-  tab_augment_dt[, bin := ggplot2::cut_number(.fitted, n = n_bins)]
+  # tab_augment_dt[, bin := ggplot2::cut_number(.fitted, n = n_bins)]
+  tab_augment_dt[, bin := tryCatch({
+    ggplot2::cut_number(.fitted, n = n_bins)
+  }, error = function(e) {
+    message("[get_detail_reg_log] ggplot2::cut_number failed: ", conditionMessage(e))
+    .fitted
+  })]
+  
+  
   binned_df <- tab_augment_dt[
     , .(
       mean_fitted = mean(.fitted),
@@ -846,7 +878,13 @@ get_detail_reg_log <- function(model) {
     fitted = tab_augment$.fitted,
     observed = model$y
   )
-  calib_dt[, decile := ggplot2::cut_number(fitted, n = 10)]
+  # calib_dt[, decile := ggplot2::cut_number(fitted, n = 10)]
+  calib_dt[, decile := tryCatch({
+    ggplot2::cut_number(fitted, n = 10)
+  }, error = function(e) {
+    message("[get_detail_reg_log] ggplot2::cut_number failed: ", conditionMessage(e))
+    fitted
+  })]
   calib_df <- calib_dt[
     , .(
       mean_predicted = mean(fitted),
