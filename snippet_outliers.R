@@ -1,7 +1,15 @@
 #### Detection outliers ####
+
 #' Detect extreme values in a numeric data.table
+#' 
+#' Tukey Method will use [Q1 - threshold * IQR  ;  Q3 + threshold * IQR]
+#' Zscore Method will use [mean - threshold * SD  ;  mean + threshold * SD]
+#' 
+#' You can use either classic threshold 
+#'   (1.5 for Tukey (classic boxplot), 3 for Zscore (3 SD))
+#'   nor apply your own threshold. 
 #'
-#' @param dt A data.table with numeric columns only
+#' @param dt A data.frame or data.table with numeric columns only
 #' @param vars Character vector of variable names to check.
 #'   Default: all numeric columns.
 #' @param method Method to detect outliers: "Tukey" or "Zscore"
@@ -9,10 +17,16 @@
 #'   Default: 1.5 for Tukey (classic boxplot), 3 for Zscore (3 SD).
 #' @param summary Logical. If TRUE, returns a summary table (one row per
 #'   variable). If FALSE, returns all outlier rows. Default: FALSE.
-#'
+#' @param verbose A logical, Default TRUE. Show message. 
+#'  Do you want to work in silence? Turn it FALSE.
+#'  
 #' @return A data.table with outlier details or summary, NULL if none found.
-#'
+#'   Check the "Row_index" line to identify the row in the original data set (dt)
+#'    with an extreme value.
+#' 
+#' @export
 #' @examples
+#' \dontrun{
 #' dt <- data.table::data.table(
 #'   PAM     = c(rnorm(43, 85, 10), 145, 150),
 #'   LACTATE = c(rnorm(44, 1.8, 0.5), 8.2, NA),
@@ -20,33 +34,43 @@
 #' )
 #'
 #' # Tukey method (default threshold 1.5)
-#' detect_outliers(dt, method = "Tukey")
+#' detect_outliers(dt, vars = names(dt), method = "Tukey")
 #'
 #' # Zscore method (default threshold 3)
-#' detect_outliers(dt, method = "Zscore")
+#' detect_outliers(dt, vars = names(dt), method = "Zscore")
 #'
 #' # Summary only
-#' detect_outliers(dt, method = "Tukey", summary = TRUE)
-#'
-#' @keywords internal
+#' detect_outliers(dt, vars = names(dt), method = "Tukey", summary = TRUE)
+#' 
+#' # Tukey avec threshold custom (boxplot étendu : 3 au lieu de 1.5)
+#' detect_outliers(dt, vars = names(dt), method = "Tukey", threshold = 3)
+#' 
+#' }
 detect_outliers <- function(
     dt,
-    vars      = names(dt)[sapply(dt, is.numeric)],
-    method    = c("Tukey", "Zscore"),
+    vars,
+    method = c("Tukey", "Zscore"),
     threshold = NULL,
-    summary   = FALSE
+    summary = FALSE, 
+    verbose = TRUE
 ) {
+  if (verbose) message("[detect_outliers]")
   
   # Validation
   method <- match.arg(method)
-  
   # Threshold par défaut selon la méthode
   if (is.null(threshold)) {
-    threshold <- switch(method,
-                        "Tukey"  = 1.5,
-                        "Zscore" = 3
+    threshold <- switch(
+      method,
+      "Tukey"  = 1.5,
+      "Zscore" = 3
     )
   }
+  stopifnot(is.numeric(threshold))
+  stopifnot(is.logical(summary))
+  stopifnot(is.logical(verbose))
+  
+  dt <- data.table::setDT(data.table::copy(dt))
   
   # Vérifier que les variables existent et sont numériques
   vars_invalid <- vars[!vars %in% names(dt)]
@@ -65,7 +89,9 @@ detect_outliers <- function(
   }
   
   # Fonction interne pour une variable
-  detect_one <- function(var_name) {
+  detect_one <- function(
+    var_name
+  ) {
     
     x       <- dt[[var_name]]
     x_clean <- x[!is.na(x)]
@@ -82,7 +108,8 @@ detect_outliers <- function(
     
     # === Calcul des bornes selon la méthode ===
     if (method == "Tukey") {
-      # Tukey : Q1 - threshold*IQR  /  Q3 + threshold*IQR
+      
+      # Tukey : Q1 - threshold*IQR ; Q3 + threshold*IQR
       q1    <- stats::quantile(x_clean, 0.25)
       q3    <- stats::quantile(x_clean, 0.75)
       iqr_x <- q3 - q1
@@ -98,7 +125,8 @@ detect_outliers <- function(
       )
       
     } else {
-      # Zscore : mean - threshold*SD  /  mean + threshold*SD
+      
+      # Zscore : mean - threshold*SD  ;  mean + threshold*SD
       mean_x <- mean(x_clean)
       sd_x   <- stats::sd(x_clean)
       lower  <- mean_x - threshold * sd_x
@@ -156,35 +184,121 @@ detect_outliers <- function(
   return(result)
 }
 
-## test ## 
+
+#### test that #### 
+library(testthat)
+
+
 # Données exemple
+set.seed(1992)
 dt <- data.table::data.table(
   PAM     = c(rnorm(43, 85, 10), 145, 150),
   LACTATE = c(rnorm(44, 1.8, 0.5), 8.2, NA),
-  FC      = c(rnorm(44, 75, 10), 180, NA)
+  FC      = c(rnorm(44, 75, 10), 180, NA),
+  BMI     = rnorm(45, 22, 1)
 )
-dt
+# dt
+
 # Tukey - détail (voir Row_index)
-detect_outliers(dt, method = "Tukey")
+dt1 <- detect_outliers(dt = dt, vars = names(dt), method = "Tukey", verbose = FALSE)
 
 # Tukey - résumé
-detect_outliers(dt, method = "Tukey", summary = TRUE)
+dt2 <- detect_outliers(dt, vars = names(dt), method = "Tukey", summary = TRUE, verbose = FALSE)
 
 # Zscore - détail
-detect_outliers(dt, method = "Zscore")
+dt3 <- detect_outliers(dt, vars = names(dt), method = "Zscore", verbose = FALSE)
 
 # Zscore - résumé
-detect_outliers(dt, method = "Zscore", summary = TRUE)
+dt4 <- detect_outliers(dt, vars = names(dt), method = "Zscore", summary = TRUE, verbose = FALSE)
 
 # Tukey avec threshold custom (boxplot étendu : 3 au lieu de 1.5)
-detect_outliers(dt, method = "Tukey", threshold = 3)
+dt5 <- detect_outliers(dt, vars = names(dt), method = "Tukey", threshold = 3, verbose = FALSE)
 
 # Sur des variables spécifiques seulement
-detect_outliers(dt, vars = c("PAM", "FC"), method = "Zscore")
+dt6 <- detect_outliers(dt, vars = c("PAM", "FC"), method = "Zscore", verbose = FALSE)
+
+# no outliers
+dt7 <- detect_outliers(dt = dt, vars = "BMI", method = "Tukey", verbose = FALSE)
+
+test_that("error outliers", {
+  expect_error( 
+    detect_outliers(dt = iris, vars = "Species", method = "Zscore")
+  )
+})
+
+test_that("no outliers", {
+  expect_null(dt7)
+  expect_equal(
+    dt2$N_outliers[dt2$Variable %in% "BMI"], 
+    0
+  )
+})
+
+test_that("find outliers summary", {
+  expect_equal(nrow(dt2), length(names(dt)))
+  expect_equal(nrow(dt4), length(names(dt)))
+  expect_equal(
+    dt2$N_outliers[dt2$Variable %in% "FC"],
+    nrow(dt1[dt1$Variable %in% "FC", ])
+  )
+  expect_equal(
+    dt4$N_outliers[dt4$Variable %in% "PAM"],
+    nrow(dt3[dt3$Variable %in% "PAM", ])
+  )
+})
+
+test_that("find outliers detail", {
+  expect_equal(unique(dt6$Variable), c("PAM", "FC"))
+  expect_equal(
+    dt$PAM[dt6$Row_index[dt6$Variable %in% "PAM"]], 
+    dt6$Value[dt6$Variable %in% "PAM"]
+  )
+})
+
+test_that("Computation outliers ranges Tukey", {
+  expect_equal(
+    dt2$Q1[dt2$Variable %in% "PAM"],
+    unname(round(quantile(dt$PAM, probs = 0.25), 3))
+  )
+  expect_equal(
+    dt2$Q3[dt2$Variable %in% "PAM"],
+    unname(round(quantile(dt$PAM, probs = 0.75), 3))
+  )
+  expect_equal(
+    dt2$Lower_bound[dt2$Variable %in% "PAM"],
+    unname(round(
+      round(quantile(dt$PAM, probs = 0.25), 3) -
+        dt2$Threshold[dt2$Variable %in% "PAM"] * (
+          dt2$Q3[dt2$Variable %in% "PAM"] - dt2$Q1[dt2$Variable %in% "PAM"]
+        )
+      ,3
+    ))
+  )
+})
 
 
+test_that("Computation outliers ranges Zscore", {
+  expect_equal(
+    dt4$SD[dt4$Variable %in% "PAM"],
+    round(sd(dt$PAM), 3)
+  )
+  expect_equal(
+    dt4$Mean[dt4$Variable %in% "PAM"],
+    (round(mean(dt$PAM), 3))
+  )
+  expect_equal(
+    dt4$Upper_bound[dt4$Variable %in% "PAM"],
+    round(
+      dt4$Mean[dt4$Variable %in% "PAM"] +
+        dt4$Threshold[dt4$Variable %in% "PAM"] * dt4$SD[dt4$Variable %in% "PAM"]
+        
+      ,3
+    )
+  )
+})
 
-#### Other version  ####
+
+#### Other (old) version  ####
 
 #### libs ####
 library(ggplot2)
