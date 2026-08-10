@@ -688,7 +688,7 @@ get_detail_reg_log <- function(model, g_bins = 5) {
     pred_prob  <- predict(model, type = "response")
     pred_class <- ifelse(pred_prob > threshold, 1, 0)
     observed_class <- model$y  # déjà en 0/1, cohérent avec le fit du modèle
-  
+    
     # Matrice de confusion
     conf_matrix <- table(Observed = observed_class, Predicted = pred_class)
     conf_matrix
@@ -697,14 +697,31 @@ get_detail_reg_log <- function(model, g_bins = 5) {
     misclassification_rate <- mean(pred_class != observed_class)
     accuracy <- 1 - misclassification_rate
     
+    TP <- sum(pred_class == 1 & observed_class == 1)
+    TN <- sum(pred_class == 0 & observed_class == 0)
+    FP <- sum(pred_class == 1 & observed_class == 0)
+    FN <- sum(pred_class == 0 & observed_class == 1)
+    
+    sensitivity <- TP / (TP + FN)  # taux de vrais positifs (recall)
+    specificity <- TN / (TN + FP)  # taux de vrais négatifs
+    ppv <- TP / (TP + FP)          # valeur prédictive positive (precision)
+    npv <- TN / (TN + FN)          # valeur prédictive négative
+    
     list(
       "misclassification_rate" = misclassification_rate,
-      "accuracy" = accuracy
+      "accuracy" = accuracy,
+      "sensitivity" = sensitivity,
+      "specificity" = specificity,
+      "ppv" = ppv,
+      "npv" = npv
     )
+    
   }
   res_mis <- misclassification(model = model)
   tab_glance$misclassification_rate <- res_mis$misclassification_rate
   tab_glance$accuracy <- res_mis$accuracy
+  tab_glance$sensitivity <- res_mis$specificity
+  tab_glance$specificity <- res_mis$sensitivity
 
   #### Validation croisée : taux de mal classés (misclassification rate) ####
  
