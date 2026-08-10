@@ -680,6 +680,32 @@ get_detail_reg_log <- function(model, g_bins = 5) {
   tab_glance$separation_suspected <- tab_glance$max_abs_se > 10  # seuil indicatif, à ajuster
   # détection plus rigoureuse, voir package detectseparation (test de Konis).
 
+  #### taux de mal classés (misclassification rate) #### 
+  
+  misclassification <- function(model,threshold = 0.5) {
+    # threshold <- 0.5  # seuil de classification, à ajuster selon ton contexte
+    
+    pred_prob  <- predict(model, type = "response")
+    pred_class <- ifelse(pred_prob > threshold, 1, 0)
+    observed_class <- model$y  # déjà en 0/1, cohérent avec le fit du modèle
+  
+    # Matrice de confusion
+    conf_matrix <- table(Observed = observed_class, Predicted = pred_class)
+    conf_matrix
+    
+    # Taux de mal classés
+    misclassification_rate <- mean(pred_class != observed_class)
+    accuracy <- 1 - misclassification_rate
+    
+    list(
+      "misclassification_rate" = misclassification_rate,
+      "accuracy" = accuracy
+    )
+  }
+  res_mis <- misclassification(model = model)
+  tab_glance$misclassification_rate <- res_mis$misclassification_rate
+  tab_glance$accuracy <- res_mis$accuracy
+
   #### Validation croisée : taux de mal classés (misclassification rate) ####
   cv_misclassification <- function(model, k = 10, seed = 1992) {
     
