@@ -707,12 +707,19 @@ get_detail_reg_log <- function(model, g_bins = 5) {
   tab_glance$accuracy <- res_mis$accuracy
 
   #### Validation croisée : taux de mal classés (misclassification rate) ####
+ 
   cv_misclassification <- function(model, k = 10, seed = 1992) {
     
     # Capture du texte affiché par CVbinary (contient les 2 estimations d'accuracy)
     set.seed(seed = seed)
+    
+    # en cas de NA dans les données originales du modèle, error dans CV .. 
+    vars_used <- all.vars(formula(model))
+    data_clean <- na.omit(as.data.frame(model$data)[, vars_used, drop = FALSE])  
+    model_clean <- glm(formula(model), data = data_clean, family = binomial)
+    
     captured_output <- capture.output(
-      CV_obj <- DAAG::CVbinary(obj = model, nfolds = k)
+      CV_obj <- DAAG::CVbinary(obj = model_clean, nfolds = k)
     )
     
     # Extraction des valeurs depuis le texte imprimé (robuste, indépendant des noms internes)
@@ -735,7 +742,7 @@ get_detail_reg_log <- function(model, g_bins = 5) {
     
   }
   cv_res <- tryCatch({
-    cv_misclassification(model, k = 10)
+    cv_misclassification(model = model, k = 10)
   }, error = function(e) {
     message("[get_detail_reg_log] CV misclassification failed: ", conditionMessage(e))
     NULL
@@ -744,6 +751,7 @@ get_detail_reg_log <- function(model, g_bins = 5) {
   tab_glance$CV_accuracy_rate <- if (!is.null(cv_res)) cv_res$cv_accuracy else NA_real_
   tab_glance$CV_misclassification_rate <- if (!is.null(cv_res)) cv_res$cv_misclassification else NA_real_
   
+
 
   #### Graph Diag ####
   
